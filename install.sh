@@ -19,7 +19,7 @@ fi
 clear
 echo -e "${CYAN}${BOLD}"
 echo "========================================="
-echo "        SSHBot Installer (Pro)"
+echo "        SSHBot Installer (Pro - Fixed)"
 echo "========================================="
 echo -e "${RESET}"
 
@@ -58,33 +58,35 @@ apt install -y python3 python3-venv python3-pip openssh-client curl >/dev/null 2
 # ================= DIRS =================
 echo -e "${BLUE}📁 Creating directories...${RESET}"
 mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${KEYS_DIR}" "${LOG_DIR}"
-
 chown -R "${BOT_USER}:${BOT_GROUP}" "${INSTALL_DIR}" "${LOG_DIR}"
 chmod 700 "${KEYS_DIR}" || true
 
-# ================= PYTHON VENV =================
-echo -e "${BLUE}🐍 Creating virtualenv...${RESET}"
-if [[ ! -d "${VENV_DIR}" ]]; then
-  python3 -m venv "${VENV_DIR}"
+# ================= PYTHON VENV (IMPORTANT: create as sshbot) =================
+echo -e "${BLUE}🐍 Creating virtualenv (as ${BOT_USER})...${RESET}"
+if [[ -d "${VENV_DIR}" ]]; then
+  echo -e "${YELLOW}ℹ️ venv already exists: ${VENV_DIR}${RESET}"
+else
+  sudo -u "${BOT_USER}" -H python3 -m venv "${VENV_DIR}"
 fi
 
-echo -e "${BLUE}📦 Installing Python packages...${RESET}"
-"${VENV_DIR}/bin/pip" install --upgrade pip >/dev/null 2>&1
-"${VENV_DIR}/bin/pip" install "python-telegram-bot==13.15" paramiko pyte >/dev/null 2>&1
+echo -e "${BLUE}📦 Installing Python packages (as ${BOT_USER})...${RESET}"
+sudo -u "${BOT_USER}" -H "${VENV_DIR}/bin/pip" install -U pip wheel setuptools >/dev/null 2>&1
+
+# IMPORTANT: urllib3<2 is required to avoid crashes when PTB falls back
+sudo -u "${BOT_USER}" -H "${VENV_DIR}/bin/pip" install \
+  "python-telegram-bot==13.15" \
+  "urllib3<2" \
+  certifi \
+  paramiko \
+  pyte >/dev/null 2>&1
 
 # ================= DEPLOY BOT FILE =================
 echo -e "${BLUE}⬇️  Deploying SSHBot...${RESET}"
 if [[ -f "./ssh-bot.py" ]]; then
   cp -f "./ssh-bot.py" "${BOT_FILE}"
 else
-  # Fallback download (edit this URL if you forked)
-  curl -fsSL \
-    "https://github.com/ItzGlace/SSHBot/raw/refs/heads/main/ssh-bot.py" \
-    -o "${BOT_FILE}"
-fi
-
-if [[ ! -f "${BOT_FILE}" ]]; then
-  echo -e "${RED}❌ Failed to deploy bot file${RESET}"
+  echo -e "${RED}❌ ssh-bot.py not found in current directory.${RESET}"
+  echo -e "${YELLOW}Put ssh-bot.py next to install.sh and rerun.${RESET}"
   exit 1
 fi
 
@@ -94,12 +96,10 @@ chown "${BOT_USER}:${BOT_GROUP}" "${BOT_FILE}"
 # ================= ENV FILE =================
 echo -e "${BLUE}🧾 Writing env file...${RESET}"
 cat > "${ENV_FILE}" <<EOF
-# SSHBot env
 BOT_TOKEN=${BOT_TOKEN}
 
-# Recommended hardening:
-# Put your Telegram numeric user id(s) here to restrict access, comma-separated.
-# Example: ALLOWED_USERS=123456789
+# Security (HIGHLY RECOMMENDED):
+# Put your Telegram numeric user id(s) here, comma-separated:
 ALLOWED_USERS=
 ALLOWED_CHATS=
 PRIVATE_ONLY=1
@@ -128,7 +128,6 @@ chmod 600 "${ENV_FILE}"
 
 # ================= SYSTEMD SERVICE =================
 echo -e "${BLUE}⚙️  Creating systemd service...${RESET}"
-
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Telegram SSH Bot (SSHBot)
@@ -144,7 +143,7 @@ ExecStart=${VENV_DIR}/bin/python ${BOT_FILE}
 Restart=always
 RestartSec=5
 
-# Basic hardening (keep it compatible)
+# Hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
@@ -155,29 +154,24 @@ ReadWritePaths=${INSTALL_DIR} ${LOG_DIR}
 WantedBy=multi-user.target
 EOF
 
-# ================= START SERVICE =================
 echo -e "${BLUE}🚀 Starting bot service...${RESET}"
-systemctl daemon-reexec
 systemctl daemon-reload
 systemctl enable sshbot >/dev/null 2>&1
 systemctl restart sshbot
 
 sleep 1
-
-# ================= STATUS =================
 if systemctl is-active --quiet sshbot; then
   echo -e "${GREEN}${BOLD}✅ SSHBot installed and running!${RESET}"
 else
   echo -e "${RED}${BOLD}❌ SSHBot failed to start${RESET}"
-  echo -e "${YELLOW}Check logs with:${RESET} journalctl -u sshbot -f"
+  echo -e "${YELLOW}Check logs with:${RESET} journalctl -u sshbot -n 80 --no-pager"
   exit 1
 fi
 
-# ================= DONE =================
 echo
 echo -e "${CYAN}📌 Commands:${RESET}"
 echo -e "  ${BOLD}systemctl status sshbot${RESET}"
 echo -e "  ${BOLD}journalctl -u sshbot -f${RESET}"
-echo -e "  ${BOLD}nano ${ENV_FILE}${RESET}   (to lock access via ALLOWED_USERS)"
+echo -e "  ${BOLD}nano ${ENV_FILE}${RESET}"
 echo
-echo -e "${GREEN}🎉 Done! Enjoy your SSH Telegram bot.${RESET}"
+echo -e "${GREEN}🎉 Done!${RESET}"
