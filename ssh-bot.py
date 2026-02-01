@@ -65,7 +65,6 @@ SERVER_DB = os.environ.get("SERVER_DB", f"{DATA_DIR}/servers.json")
 LOG_DIR = os.environ.get("LOG_DIR", "/var/log/ssh-bot")
 LOG_FILE = os.environ.get("LOG_FILE", f"{LOG_DIR}/ssh-bot.log")
 
-REPO_URL = os.environ.get("REPO_URL", "https://github.com/ItzGlace/SSHBot")
 
 # ================= LOGGING =================
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -895,7 +894,7 @@ def start_cmd(update: Update, ctx: CallbackContext):
     text = (
         "SSHBot آماده است ✅\n\n"
         "از دکمه‌ها استفاده کن یا دستورها رو تایپ کن.\n"
-        f"<a href=\"{REPO_URL}\">source code</a> - by @EmptyPoll"
+
     )
     update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard_main(update.effective_user.id),
                               disable_web_page_preview=True)
