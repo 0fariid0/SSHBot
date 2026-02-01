@@ -8,9 +8,9 @@ import logging
 import logging.handlers
 import re
 import html
+import secrets
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, List, Optional, Any
-from urllib.parse import quote as urlquote, unquote as urlunquote
 
 import paramiko
 import pyte
@@ -20,7 +20,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ParseMode,
-    ForceReply,
 )
 from telegram.ext import (
     Updater,
@@ -39,13 +38,11 @@ TERM_LINES = int(os.environ.get("TERM_LINES", "200"))
 UPDATE_INTERVAL = float(os.environ.get("UPDATE_INTERVAL", "1.0"))
 MAX_TG_CHARS = int(os.environ.get("MAX_TG_CHARS", "3900"))
 
-# Session & security
 SESSION_TIMEOUT = int(os.environ.get("SESSION_TIMEOUT", "0"))  # seconds; 0=disabled
 KEEPALIVE_SEC = int(os.environ.get("KEEPALIVE_SEC", "30"))
-PRIVATE_ONLY = os.environ.get("PRIVATE_ONLY", "0").strip() in ("1", "true", "yes", "on")
-STRICT_HOST_KEY = os.environ.get("STRICT_HOST_KEY", "0").strip() in ("1", "true", "yes", "on")
+PRIVATE_ONLY = os.environ.get("PRIVATE_ONLY", "0").strip().lower() in ("1", "true", "yes", "on")
+STRICT_HOST_KEY = os.environ.get("STRICT_HOST_KEY", "0").strip().lower() in ("1", "true", "yes", "on")
 
-# Access control (recommended)
 def _parse_csv_ints(val: str) -> List[int]:
     out: List[int] = []
     for x in (val or "").split(","):
@@ -61,7 +58,6 @@ def _parse_csv_ints(val: str) -> List[int]:
 ALLOWED_USERS = set(_parse_csv_ints(os.environ.get("ALLOWED_USERS", "")))
 ALLOWED_CHATS = set(_parse_csv_ints(os.environ.get("ALLOWED_CHATS", "")))
 
-# Paths
 INSTALL_DIR = os.environ.get("INSTALL_DIR", "/opt/sshbot")
 DATA_DIR = os.environ.get("DATA_DIR", f"{INSTALL_DIR}/data")
 SERVER_DB = os.environ.get("SERVER_DB", f"{DATA_DIR}/servers.json")
@@ -133,7 +129,7 @@ class PendingConn:
     user: str
     host: str
     port: int = 22
-    server_name: str = ""
+    server_id: str = ""
     created_at: float = field(default_factory=time.time)
 
 @dataclass
@@ -149,19 +145,15 @@ DATA_LOCK = threading.Lock()
 SESSIONS: Dict[SessionKey, "SSHSession"] = {}
 PENDING: Dict[SessionKey, PendingConn] = {}
 WIZARD: Dict[SessionKey, WizardState] = {}
-MENUS: Dict[SessionKey, int] = {}  # last menu message id
-
 
 # ================= UTIL =================
 def now_ts() -> float:
     return time.time()
 
 def html_pre(text: str) -> str:
-    # Escape as HTML for Telegram <pre>
     return f"<pre>{html.escape(text)}</pre>"
 
 def clamp_tg(text: str) -> str:
-    # clamp by Telegram message char limit, from bottom
     lines = text.splitlines()
     out: List[str] = []
     for line in reversed(lines):
@@ -184,26 +176,51 @@ def is_authorized(update: Update) -> bool:
     if PRIVATE_ONLY and not is_private_chat(update):
         return False
 
-    # if allowlists are empty -> open (keeps backward compatibility)
-    if ALLOWED_USERS:
-        if user_id not in ALLOWED_USERS:
-            return False
-    if ALLOWED_CHATS:
-        if chat_id not in ALLOWED_CHATS:
-            return False
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        return False
+    if ALLOWED_CHATS and chat_id not in ALLOWED_CHATS:
+        return False
+    return True
+
+def guard(update: Update) -> bool:
+    if not is_authorized(update):
+        try:
+            update.effective_message.reply_text("⛔ دسترسی نداری یا فقط باید در چت خصوصی استفاده بشه.")
+        except Exception:
+            pass
+        return False
     return True
 
 def session_key_from_update(update: Update) -> SessionKey:
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    return (chat_id, user_id)
+    return (update.effective_chat.id, update.effective_user.id)
 
 def session_key_from_query(update: Update) -> SessionKey:
     q = update.callback_query
-    chat_id = q.message.chat_id
-    user_id = q.from_user.id
-    return (chat_id, user_id)
+    return (q.message.chat_id, q.from_user.id)
 
+def parse_target(text: str) -> Optional[Tuple[str, str, int]]:
+    text = (text or "").strip()
+    m = SSH_RE.match(text)
+    if not m:
+        return None
+    user, host, port = m.group(1), m.group(2), int(m.group(3) or 22)
+    return user, host, port
+
+def gen_server_id() -> str:
+    # short stable id for callback_data (<=64 bytes)
+    return secrets.token_hex(4)  # 8 chars
+
+def validate_server_name(name: str) -> Optional[str]:
+    name = (name or "").strip()
+    if not name:
+        return "اسم سرور خالیه."
+    if len(name) > 32:
+        return "اسم سرور طولانیه (حداکثر ۳۲ کاراکتر)."
+    if any(c in name for c in ["\n", "\r", "\t"]):
+        return "اسم سرور کاراکتر نامعتبر دارد."
+    return None
+
+# ================= SERVER DB (ID-BASED + MIGRATION) =================
 def load_server_db() -> Dict[str, Any]:
     with DATA_LOCK:
         try:
@@ -231,115 +248,145 @@ def save_server_db(db: Dict[str, Any]) -> None:
         except Exception:
             logger.exception("Failed to save server db")
 
+def _ensure_user_record(db: Dict[str, Any], user_id: int) -> Dict[str, Any]:
+    users = db.setdefault("users", {})
+    rec = users.get(str(user_id))
+    if not isinstance(rec, dict):
+        rec = {}
+    if "servers" not in rec or not isinstance(rec["servers"], dict):
+        rec["servers"] = {}
+    if "default" not in rec or not isinstance(rec["default"], str):
+        rec["default"] = ""
+    users[str(user_id)] = rec
+    return rec
+
+def _migrate_if_needed(db: Dict[str, Any], user_id: int) -> None:
+    """
+    Old format (name-based):
+      servers = { "myserver": {"user":..., "host":..., "port":...}, ... }
+      default = "myserver"
+    New format (id-based):
+      servers = { "a1b2c3d4": {"name":"myserver", "user":..., "host":..., "port":...}, ... }
+      default = "a1b2c3d4"
+    """
+    rec = _ensure_user_record(db, user_id)
+    servers = rec.get("servers", {})
+    default = rec.get("default", "")
+
+    if not servers:
+        return
+
+    # detect old format: values missing "name"
+    old_format = False
+    for k, v in servers.items():
+        if isinstance(v, dict) and "name" not in v:
+            # likely old
+            old_format = True
+            break
+
+    if not old_format:
+        return
+
+    new_servers: Dict[str, Any] = {}
+    name_to_id: Dict[str, str] = {}
+
+    for name, info in list(servers.items()):
+        if not isinstance(info, dict):
+            continue
+        sid = gen_server_id()
+        while sid in new_servers:
+            sid = gen_server_id()
+        info2 = dict(info)
+        info2["name"] = name
+        new_servers[sid] = info2
+        name_to_id[name] = sid
+
+    # migrate default
+    new_default = name_to_id.get(default, "")
+    rec["servers"] = new_servers
+    rec["default"] = new_default
+
 def get_user_servers(user_id: int) -> Dict[str, Any]:
     db = load_server_db()
-    u = db["users"].get(str(user_id), {})
-    servers = u.get("servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
-    return servers
+    _migrate_if_needed(db, user_id)
+    rec = _ensure_user_record(db, user_id)
+    # save if migrated
+    save_server_db(db)
+    servers = rec.get("servers", {})
+    return servers if isinstance(servers, dict) else {}
 
-def set_user_servers(user_id: int, servers: Dict[str, Any], default: str = "") -> None:
+def set_user_servers(user_id: int, servers: Dict[str, Any], default_id: Optional[str] = None) -> None:
     db = load_server_db()
-    u = db["users"].get(str(user_id), {})
-    if not isinstance(u, dict):
-        u = {}
-    u["servers"] = servers
-    if default:
-        u["default"] = default
-    db["users"][str(user_id)] = u
+    rec = _ensure_user_record(db, user_id)
+    rec["servers"] = servers
+    if default_id is not None:
+        rec["default"] = default_id
     save_server_db(db)
 
-def get_user_default_server(user_id: int) -> str:
+def get_user_default_server_id(user_id: int) -> str:
     db = load_server_db()
-    u = db["users"].get(str(user_id), {})
-    if isinstance(u, dict):
-        d = u.get("default", "")
-        if isinstance(d, str):
-            return d
-    return ""
+    _migrate_if_needed(db, user_id)
+    rec = _ensure_user_record(db, user_id)
+    save_server_db(db)
+    d = rec.get("default", "")
+    return d if isinstance(d, str) else ""
 
-def set_user_default_server(user_id: int, name: str) -> None:
+def set_user_default_server_id(user_id: int, server_id: str) -> None:
     db = load_server_db()
-    u = db["users"].get(str(user_id), {})
-    if not isinstance(u, dict):
-        u = {}
-    u["default"] = name
-    if "servers" not in u or not isinstance(u["servers"], dict):
-        u["servers"] = {}
-    db["users"][str(user_id)] = u
+    _migrate_if_needed(db, user_id)
+    rec = _ensure_user_record(db, user_id)
+    rec["default"] = server_id
     save_server_db(db)
 
-def validate_server_name(name: str) -> Optional[str]:
+def find_server_by_name(user_id: int, name: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     name = (name or "").strip()
-    if not name:
-        return "Server name cannot be empty."
-    if len(name) > 32:
-        return "Server name is too long (max 32)."
-    if any(c in name for c in [":", "|", "\n", "\r"]):
-        return "Server name contains invalid characters."
+    servers = get_user_servers(user_id)
+    # exact match
+    for sid, info in servers.items():
+        if isinstance(info, dict) and info.get("name") == name:
+            return sid, info
+    # case-insensitive fallback for ascii names
+    low = name.lower()
+    for sid, info in servers.items():
+        if isinstance(info, dict) and str(info.get("name", "")).lower() == low:
+            return sid, info
     return None
 
-def parse_target(text: str) -> Optional[Tuple[str, str, int]]:
-    text = (text or "").strip()
-    m = SSH_RE.match(text)
-    if not m:
-        return None
-    user, host, port = m.group(1), m.group(2), int(m.group(3) or 22)
-    return user, host, port
-
-
-# ================= UI (INLINE "GLASS" BUTTONS) =================
+# ================= UI (INLINE BUTTONS) =================
 def keyboard_main(user_id: int) -> InlineKeyboardMarkup:
-    # Main menu (inline buttons)
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("🔌 اتصال", callback_data="M:CONNECT"),
-                InlineKeyboardButton("📚 سرورها", callback_data="M:SERVERS"),
-            ],
-            [
-                InlineKeyboardButton("📊 وضعیت", callback_data="M:STATUS"),
-                InlineKeyboardButton("🛑 قطع", callback_data="M:STOP"),
-            ],
-            [
-                InlineKeyboardButton("➕ افزودن سرور", callback_data="M:ADD_SERVER"),
-                InlineKeyboardButton("❓ راهنما", callback_data="M:HELP"),
-            ],
+            [InlineKeyboardButton("🔌 اتصال", callback_data="M:CONNECT"),
+             InlineKeyboardButton("📚 سرورها", callback_data="M:SERVERS")],
+            [InlineKeyboardButton("📊 وضعیت", callback_data="M:STATUS"),
+             InlineKeyboardButton("🛑 قطع", callback_data="M:STOP")],
+            [InlineKeyboardButton("➕ افزودن سرور", callback_data="M:ADD_SERVER"),
+             InlineKeyboardButton("🆔 آی‌دی من", callback_data="M:MYID")],
+            [InlineKeyboardButton("❓ راهنما", callback_data="M:HELP")],
         ]
     )
 
 def keyboard_servers_list(user_id: int) -> InlineKeyboardMarkup:
     servers = get_user_servers(user_id)
-    default = get_user_default_server(user_id)
+    default_id = get_user_default_server_id(user_id)
 
     rows: List[List[InlineKeyboardButton]] = []
-    # server buttons
-    for name in sorted(servers.keys(), key=lambda s: s.lower()):
-        star = "⭐ " if name == default else ""
-        rows.append([InlineKeyboardButton(f"{star}🖥 {name}", callback_data=f"SV:OPEN:{urlquote(name)}")])
+    for sid, info in sorted(servers.items(), key=lambda kv: str(kv[1].get("name", "")).lower()):
+        name = str(info.get("name", sid))
+        star = "⭐ " if sid == default_id else ""
+        rows.append([InlineKeyboardButton(f"{star}🖥 {name}", callback_data=f"SV:OPEN:{sid}")])
 
-    # footer
-    rows.append(
-        [
-            InlineKeyboardButton("➕ اضافه", callback_data="M:ADD_SERVER"),
-            InlineKeyboardButton("⬅️ منو", callback_data="M:MENU"),
-        ]
-    )
+    rows.append([InlineKeyboardButton("➕ اضافه", callback_data="M:ADD_SERVER"),
+                 InlineKeyboardButton("⬅️ منو", callback_data="M:MENU")])
     return InlineKeyboardMarkup(rows)
 
-def keyboard_server_actions(name: str) -> InlineKeyboardMarkup:
-    qname = urlquote(name)
+def keyboard_server_actions(server_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("🔌 اتصال", callback_data=f"SV:CONNECT:{qname}"),
-                InlineKeyboardButton("⭐ پیش‌فرض", callback_data=f"SV:DEFAULT:{qname}"),
-            ],
-            [
-                InlineKeyboardButton("🗑 حذف", callback_data=f"SV:DELETE:{qname}"),
-                InlineKeyboardButton("⬅️ لیست", callback_data="M:SERVERS"),
-            ],
+            [InlineKeyboardButton("🔌 اتصال", callback_data=f"SV:CONNECT:{server_id}"),
+             InlineKeyboardButton("⭐ پیش‌فرض", callback_data=f"SV:DEFAULT:{server_id}")],
+            [InlineKeyboardButton("🗑 حذف", callback_data=f"SV:DELETE:{server_id}"),
+             InlineKeyboardButton("⬅️ لیست", callback_data="M:SERVERS")],
         ]
     )
 
@@ -367,17 +414,15 @@ class SSHSession:
 
         self.connected_at = now_ts()
         self.last_activity = now_ts()
-        self.target = ""  # user@host:port
+        self.target = ""
         self.kb_page = 0
 
-    # ---------- CONNECT ----------
     def start(self, user: str, host: str, port: int, password: str) -> Tuple[bool, Optional[str]]:
         try:
             self.target = f"{user}@{host}:{port}"
             self.client = paramiko.SSHClient()
 
             if STRICT_HOST_KEY:
-                # Strict host key checking
                 self.client.load_system_host_keys()
                 self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
             else:
@@ -422,12 +467,10 @@ class SSHSession:
             logger.exception("SSH connect failed")
             return False, str(e)
 
-    # ---------- LOOP ----------
     def loop(self):
         last_update = 0.0
         while not self.stop.is_set():
             try:
-                # inactivity timeout
                 if SESSION_TIMEOUT > 0 and (now_ts() - self.last_activity) > SESSION_TIMEOUT:
                     logger.info("Session timeout: %s", self.target)
                     break
@@ -449,16 +492,13 @@ class SSHSession:
                 logger.exception("Reader loop error")
                 break
 
-        # ensure close is called
         try:
             self.close()
         except Exception:
             pass
 
-    # ---------- RENDER ----------
     def render_and_update(self):
         text = "\n".join(self.screen.display).rstrip()
-
         if text == self.last_render:
             return
 
@@ -479,10 +519,8 @@ class SSHSession:
             )
             self.last_sent = safe
         except Exception as e:
-            # ignore frequent "message is not modified" or edit race
             logger.debug("Edit failed: %s", e)
 
-    # ---------- INPUT ----------
     def send(self, text: str):
         try:
             if self.chan and not self.stop.is_set():
@@ -491,9 +529,7 @@ class SSHSession:
         except Exception:
             logger.exception("Send failed")
 
-    # ---------- KEYBOARD ----------
     def keyboard(self) -> InlineKeyboardMarkup:
-        # Multi-page keyboard (glass buttons): keys + macros + quick cmds + menu
         if self.kb_page == 0:
             rows = [
                 [
@@ -525,36 +561,30 @@ class SSHSession:
             ]
             return InlineKeyboardMarkup(rows)
 
-        if self.kb_page == 1:
-            rows = [
-                [
-                    InlineKeyboardButton("uptime", callback_data="QC:UPTIME"),
-                    InlineKeyboardButton("df -h", callback_data="QC:DF"),
-                    InlineKeyboardButton("free -h", callback_data="QC:FREE"),
-                ],
-                [
-                    InlineKeyboardButton("whoami", callback_data="QC:WHOAMI"),
-                    InlineKeyboardButton("pwd", callback_data="QC:PWD"),
-                    InlineKeyboardButton("ls", callback_data="QC:LS"),
-                ],
-                [
-                    InlineKeyboardButton("clear", callback_data="QC:CLEAR"),
-                    InlineKeyboardButton("Ctrl+L", callback_data="MC:CTRL_L"),
-                    InlineKeyboardButton("Ctrl+D", callback_data="MC:CTRL_D"),
-                ],
-                [
-                    InlineKeyboardButton("🔙 بازگشت", callback_data="KB:PAGE:0"),
-                    InlineKeyboardButton("📚 سرورها", callback_data="A:SERVERS"),
-                    InlineKeyboardButton("🛑 قطع", callback_data="A:STOP"),
-                ],
-            ]
-            return InlineKeyboardMarkup(rows)
+        rows = [
+            [
+                InlineKeyboardButton("uptime", callback_data="QC:UPTIME"),
+                InlineKeyboardButton("df -h", callback_data="QC:DF"),
+                InlineKeyboardButton("free -h", callback_data="QC:FREE"),
+            ],
+            [
+                InlineKeyboardButton("whoami", callback_data="QC:WHOAMI"),
+                InlineKeyboardButton("pwd", callback_data="QC:PWD"),
+                InlineKeyboardButton("ls", callback_data="QC:LS"),
+            ],
+            [
+                InlineKeyboardButton("clear", callback_data="QC:CLEAR"),
+                InlineKeyboardButton("Ctrl+L", callback_data="MC:CTRL_L"),
+                InlineKeyboardButton("Ctrl+D", callback_data="MC:CTRL_D"),
+            ],
+            [
+                InlineKeyboardButton("🔙 بازگشت", callback_data="KB:PAGE:0"),
+                InlineKeyboardButton("📚 سرورها", callback_data="A:SERVERS"),
+                InlineKeyboardButton("🛑 قطع", callback_data="A:STOP"),
+            ],
+        ]
+        return InlineKeyboardMarkup(rows)
 
-        # fallback
-        self.kb_page = 0
-        return self.keyboard()
-
-    # ---------- CLOSE ----------
     def close(self):
         self.stop.set()
         try:
@@ -585,7 +615,6 @@ class SSHSession:
             logger.debug("Could not update closed message: %s", e)
 
         logger.info("Session closed %s", self.target or str(self.key))
-
 
 # ================= SESSION HELPERS =================
 def get_session(key: SessionKey) -> Optional[SSHSession]:
@@ -624,7 +653,7 @@ def get_pending(key: SessionKey) -> Optional[PendingConn]:
     with STATE_LOCK:
         return PENDING.get(key)
 
-# ================= MODIFIER HELPERS (kept) =================
+# ================= MODIFIER HELPERS =================
 def parse_combo_tokens(tokens: List[str]) -> Tuple[List[str], str]:
     merged: List[str] = []
     for t in tokens:
@@ -661,11 +690,7 @@ def build_sequence_from_mods_and_key(mods: List[str], key_token: str) -> str:
             return "\x1b" + seq
         return seq
 
-    ch = key_token
-    if len(ch) == 0:
-        return ""
-    ch0 = ch[0]
-
+    ch0 = key_token[0]
     seq = ""
     if "ALT" in mods:
         seq += "\x1b"
@@ -673,8 +698,7 @@ def build_sequence_from_mods_and_key(mods: List[str], key_token: str) -> str:
     if "CTRL" in mods:
         c = ch0.lower()
         if "a" <= c <= "z":
-            ctrl_char = chr(ord(c) - 96)
-            seq += ctrl_char
+            seq += chr(ord(c) - 96)
             return seq
         try:
             seq += chr(ord(ch0) & 0x1f)
@@ -689,37 +713,14 @@ def build_sequence_from_mods_and_key(mods: List[str], key_token: str) -> str:
             seq += ch0
         return seq
 
-# ================= MENU / WIZARD =================
-def send_menu(update: Update, ctx: CallbackContext, text: str = ""):
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    if not text:
-        text = (
-            "SSHBot آماده است ✅\n\n"
-            "با دکمه‌ها کار کن یا دستورها رو تایپ کن.\n"
-            f"<a href=\"{REPO_URL}\">source code</a> - by @EmptyPoll"
-        )
-
-    msg = update.effective_message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard_main(user_id),
-        disable_web_page_preview=True,
-    )
-    try:
-        key = session_key_from_update(update)
-        with STATE_LOCK:
-            MENUS[key] = msg.message_id
-    except Exception:
-        pass
-
+# ================= WIZARD =================
 def wizard_ask_target(update: Update, ctx: CallbackContext):
     key = session_key_from_update(update)
     chat_id, user_id = key
 
     prompt = ctx.bot.send_message(
         chat_id,
-        "🔌 لطفاً مقصد SSH رو بفرست:\n"
+        "🔌 مقصد SSH رو بفرست:\n"
         "<code>user@host</code> یا <code>user@host:port</code>\n\n"
         "مثال: <code>root@1.2.3.4:22</code>",
         parse_mode=ParseMode.HTML,
@@ -744,7 +745,7 @@ def wizard_ask_password(ctx: CallbackContext, key: SessionKey):
     st = get_wizard(key) or WizardState(step="AWAIT_PASSWORD")
     st.step = "AWAIT_PASSWORD"
     st.prompt_msg_id = prompt.message_id
-    st.data.update({"user": p.user, "host": p.host, "port": p.port, "server_name": p.server_name})
+    st.data.update({"user": p.user, "host": p.host, "port": p.port, "server_id": p.server_id})
     set_wizard(key, st)
 
 def wizard_start_add_server(update: Update, ctx: CallbackContext):
@@ -759,9 +760,6 @@ def wizard_start_add_server(update: Update, ctx: CallbackContext):
     set_wizard(key, WizardState(step="ADD_SERVER_NAME", prompt_msg_id=prompt.message_id))
 
 def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
-    """
-    Return True if message was consumed by wizard.
-    """
     key = session_key_from_update(update)
     st = get_wizard(key)
     if not st:
@@ -774,7 +772,7 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
 
     text = (msg.text or "").strip()
 
-    # In groups: require reply-to prompt for safety; in private accept anyway.
+    # In groups: require reply to prompt for safety
     if update.effective_chat.type != "private":
         if not msg.reply_to_message or msg.reply_to_message.message_id != st.prompt_msg_id:
             return False
@@ -791,22 +789,17 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
     if st.step == "AWAIT_TARGET":
         target = parse_target(text)
         if not target:
-            ctx.bot.send_message(
-                chat_id,
-                "❌ فرمت اشتباهه. باید مثل این باشه:\n<code>user@host</code> یا <code>user@host:22</code>",
-                parse_mode=ParseMode.HTML,
-            )
+            ctx.bot.send_message(chat_id, "❌ فرمت اشتباهه. مثال: <code>root@1.2.3.4:22</code>", parse_mode=ParseMode.HTML)
             return True
         user, host, port = target
-        _try_delete()  # hide target in chat (optional privacy)
-
+        _try_delete()
         set_pending(key, PendingConn(user=user, host=host, port=port))
         wizard_ask_password(ctx, key)
         return True
 
     if st.step == "AWAIT_PASSWORD":
         pwd = text
-        _try_delete()  # password privacy
+        _try_delete()
 
         p = get_pending(key)
         if not p:
@@ -814,8 +807,6 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
             ctx.bot.send_message(chat_id, "❌ درخواست اتصال پیدا نشد. دوباره تلاش کن.", parse_mode=ParseMode.HTML)
             return True
 
-        # connect
-        # stop any existing session for that user
         stop_session(key)
 
         sess = SSHSession(key, ctx.bot)
@@ -823,20 +814,16 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
             SESSIONS[key] = sess
 
         ok, err = sess.start(p.user, p.host, p.port, pwd)
-        clear_wizard(key)  # clears pending too
+        clear_wizard(key)
+
         if not ok:
             with STATE_LOCK:
                 SESSIONS.pop(key, None)
-            ctx.bot.send_message(
-                chat_id,
-                f"❌ اتصال ناموفق بود:\n<code>{html.escape(str(err))}</code>",
-                parse_mode=ParseMode.HTML,
-            )
+            ctx.bot.send_message(chat_id, f"❌ اتصال ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
         else:
             ctx.bot.send_message(
                 chat_id,
-                f"✅ وصل شدی به <b>{html.escape(sess.target)}</b>\n"
-                "ترمینال بالاست. پیام‌های متنی رو به عنوان ورودی می‌فرستم (و پاک می‌کنم).",
+                f"✅ وصل شدی به <b>{html.escape(sess.target)}</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=keyboard_main(user_id),
             )
@@ -852,7 +839,6 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
 
         st.step = "ADD_SERVER_TARGET"
         st.data["name"] = name
-        # ask for target
         prompt = ctx.bot.send_message(
             chat_id,
             f"حالا مقصد SSH برای <b>{html.escape(name)}</b> رو بفرست:\n"
@@ -874,99 +860,83 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
         _try_delete()
 
         servers = get_user_servers(user_id)
-        servers[name] = {"user": user, "host": host, "port": port, "created_at": int(now_ts()), "last_used": int(now_ts())}
-        set_user_servers(user_id, servers)
-        clear_wizard(key)
 
-        ctx.bot.send_message(
-            chat_id,
-            f"✅ سرور <b>{html.escape(name)}</b> ذخیره شد.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard_servers_list(user_id),
-        )
+        # if name exists -> overwrite that entry
+        existing = find_server_by_name(user_id, name)
+        if existing:
+            sid, _ = existing
+        else:
+            sid = gen_server_id()
+            while sid in servers:
+                sid = gen_server_id()
+
+        servers[sid] = {
+            "name": name,
+            "user": user,
+            "host": host,
+            "port": port,
+            "created_at": int(now_ts()),
+            "last_used": int(now_ts()),
+        }
+        set_user_servers(user_id, servers)
+
+        clear_wizard(key)
+        ctx.bot.send_message(chat_id, f"✅ سرور <b>{html.escape(name)}</b> ذخیره شد.", parse_mode=ParseMode.HTML,
+                             reply_markup=keyboard_servers_list(user_id))
         return True
 
-    # unknown step -> clear
     clear_wizard(key)
     return False
 
-
-# ================= COMMAND HANDLERS =================
-def guard(update: Update) -> bool:
-    if not is_authorized(update):
-        try:
-            update.effective_message.reply_text("⛔ دسترسی نداری یا فقط باید در چت خصوصی استفاده بشه.")
-        except Exception:
-            pass
-        return False
-    return True
-
+# ================= COMMANDS =================
 def start_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
-    send_menu(update, ctx)
+    text = (
+        "SSHBot آماده است ✅\n\n"
+        "از دکمه‌ها استفاده کن یا دستورها رو تایپ کن.\n"
+        f"<a href=\"{REPO_URL}\">source code</a> - by @EmptyPoll"
+    )
+    update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard_main(update.effective_user.id),
+                              disable_web_page_preview=True)
 
 def menu_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
-    send_menu(update, ctx)
+    update.message.reply_text("منو:", reply_markup=keyboard_main(update.effective_user.id))
+
+def id_cmd(update: Update, ctx: CallbackContext):
+    if not guard(update):
+        return
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    update.message.reply_text(f"🆔 User ID: {user_id}\n🧾 Chat ID: {chat_id}")
 
 def help_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
     text = (
-        "HELP — Commands / راهنما — دستورات\n\n"
-        "✅ حالت دکمه‌ای (پیشنهادی):\n"
-        " /start یا /menu رو بزن و از دکمه‌ها برای اتصال/مدیریت سرورها استفاده کن.\n\n"
-        "Core flow / نحوه استفاده اصلی (دستورها همچنان کار می‌کنن):\n"
-        "1) `/ssh user@host[:port]` — آماده‌سازی اتصال (بعدش پسورد رو بفرست).\n"
-        "   Example: `/ssh alice@example.com:22`\n"
-        "2) `/pass <password>` — ارسال پسورد (بات پیام رو برای حریم خصوصی حذف می‌کنه).\n"
-        "3) وقتی سشن فعال شد، هر پیام متنی به عنوان ورودی به SSH ارسال میشه و پیام از چت حذف میشه.\n\n"
-        "Stopping / قطع سشن:\n"
-        "`/stop` — stop the current SSH session.\n"
-        "`/ssh` بدون آرگومان — قطع سشن فعلی.\n\n"
-        "Multi-server / چند سرور:\n"
-        "`/servers` — لیست سرورهای ذخیره شده.\n"
-        "`/addserver <name> user@host[:port]` — اضافه کردن سریع.\n"
-        "`/delserver <name>` — حذف.\n"
-        "یا از دکمه «سرورها» استفاده کن.\n\n"
-        "Special buttons / دکمه‌های ترمینال:\n"
-        "TAB, ENTER, ESC, BS, ↑ ↓ ← →, PGUP, PGDN, Ctrl+C, Ctrl+Z, ...\n\n"
-        "Modifiers / ترکیب‌ها:\n"
-        " - `/ctrl <combo>` — مثال: `/ctrl c` -> Ctrl+C\n"
-        " - `/alt <combo>`\n"
-        " - `/shift <combo>`\n"
-        " - `/keys <combo>` — مثال: `/keys ctrl+alt+c`\n\n"
-        "Security / امنیت:\n"
-        " - فقط روی سرورهایی استفاده کن که مجوزش رو داری.\n"
-        " - پیشنهاد: `ALLOWED_USERS` رو توی env تنظیم کن تا فقط خودت بتونی استفاده کنی.\n"
+        "HELP / راهنما\n\n"
+        "✅ حالت دکمه‌ای: /start یا /menu\n"
+        "🆔 گرفتن آی‌دی: /id\n\n"
+        "Legacy commands:\n"
+        " /ssh user@host[:port]\n"
+        " /pass <password>  (پیام حذف میشه)\n"
+        " /stop\n\n"
+        "Multi-server:\n"
+        " /servers\n"
+        " /addserver <name> user@host[:port]\n"
+        " /delserver <name>\n\n"
+        "Key combos:\n"
+        " /ctrl c   /alt a   /keys ctrl+alt+c\n"
     )
-    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-def status_cmd(update: Update, ctx: CallbackContext):
-    if not guard(update):
-        return
-    key = session_key_from_update(update)
-    s = get_session(key)
-    if not s:
-        update.message.reply_text("ℹ️ سشن فعالی نداری. از /start یا دکمه اتصال استفاده کن.")
-        return
-    uptime = int(now_ts() - s.connected_at)
-    idle = int(now_ts() - s.last_activity)
-    update.message.reply_text(
-        f"📊 وضعیت سشن:\n"
-        f"Target: {s.target}\n"
-        f"Uptime: {uptime}s\n"
-        f"Idle: {idle}s\n"
-        f"Keyboard page: {s.kb_page}",
-    )
+    update.message.reply_text(text)
 
 def servers_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
     user_id = update.effective_user.id
-    update.message.reply_text("📚 سرورهای ذخیره شده:", reply_markup=keyboard_servers_list(user_id))
+    update.message.reply_text("📚 سرورهای شما:", reply_markup=keyboard_servers_list(user_id))
 
 def addserver_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -980,15 +950,24 @@ def addserver_cmd(update: Update, ctx: CallbackContext):
     if err:
         update.message.reply_text(f"❌ {err}")
         return
+
     target_str = " ".join(ctx.args[1:]).strip()
     target = parse_target(target_str)
     if not target:
-        update.message.reply_text("❌ Target format is invalid. Example: root@1.2.3.4:22")
+        update.message.reply_text("❌ Target invalid. Example: root@1.2.3.4:22")
         return
     user, host, port = target
 
     servers = get_user_servers(user_id)
-    servers[name] = {"user": user, "host": host, "port": port, "created_at": int(now_ts()), "last_used": int(now_ts())}
+    existing = find_server_by_name(user_id, name)
+    if existing:
+        sid, _ = existing
+    else:
+        sid = gen_server_id()
+        while sid in servers:
+            sid = gen_server_id()
+
+    servers[sid] = {"name": name, "user": user, "host": host, "port": port, "created_at": int(now_ts()), "last_used": int(now_ts())}
     set_user_servers(user_id, servers)
 
     update.message.reply_text("✅ ذخیره شد.", reply_markup=keyboard_servers_list(user_id))
@@ -1001,46 +980,54 @@ def delserver_cmd(update: Update, ctx: CallbackContext):
         update.message.reply_text("Usage: /delserver <name>")
         return
     name = " ".join(ctx.args).strip()
-    servers = get_user_servers(user_id)
-    if name not in servers:
-        update.message.reply_text("❌ چنین سروری پیدا نشد.")
+    found = find_server_by_name(user_id, name)
+    if not found:
+        update.message.reply_text("❌ پیدا نشد.")
         return
-    servers.pop(name, None)
-    set_user_servers(user_id, servers)
-    # if was default, clear default
-    if get_user_default_server(user_id) == name:
-        set_user_default_server(user_id, "")
+    sid, _ = found
+
+    servers = get_user_servers(user_id)
+    servers.pop(sid, None)
+
+    default_id = get_user_default_server_id(user_id)
+    if default_id == sid:
+        set_user_servers(user_id, servers, default_id="")
+    else:
+        set_user_servers(user_id, servers)
+
     update.message.reply_text("🗑 حذف شد.", reply_markup=keyboard_servers_list(user_id))
+
+def status_cmd(update: Update, ctx: CallbackContext):
+    if not guard(update):
+        return
+    key = session_key_from_update(update)
+    s = get_session(key)
+    if not s:
+        update.message.reply_text("ℹ️ سشن فعالی نداری.")
+        return
+    uptime = int(now_ts() - s.connected_at)
+    idle = int(now_ts() - s.last_activity)
+    update.message.reply_text(f"📊 وضعیت:\nTarget: {s.target}\nUptime: {uptime}s\nIdle: {idle}s")
 
 def ssh_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
     key = session_key_from_update(update)
-    chat_id, user_id = key
 
-    # /ssh بدون آرگومان => قطع
     if not ctx.args:
         stopped = stop_session(key)
-        if stopped:
-            update.message.reply_text("Stopped existing SSH session. / سشن قطع شد.")
-        else:
-            update.message.reply_text("No active SSH session to stop. / سشن فعالی وجود ندارد.")
+        update.message.reply_text("سشن قطع شد ✅" if stopped else "سشن فعالی نیست.")
         return
 
-    # اگر سشن هست، برای همین کاربر قطع کن (پشتیبانی گروه هم بهتر میشه)
     stop_session(key)
 
     target = parse_target(ctx.args[0])
     if not target:
-        update.message.reply_text("Usage: /ssh user@host[:port]  /  نحوه استفاده: /ssh user@host[:port]")
+        update.message.reply_text("Usage: /ssh user@host[:port]")
         return
-
     user, host, port = target
     set_pending(key, PendingConn(user=user, host=host, port=port))
-    # keep old behavior: ask to send /pass
-    update.message.reply_text(
-        "Send password using /pass <password> (message will be deleted). / برای ارسال رمز از /pass استفاده کنید (پیام حذف خواهد شد)."
-    )
+    update.message.reply_text("پسورد رو با /pass <password> بفرست (پیام حذف میشه).")
 
 def pass_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -1050,27 +1037,20 @@ def pass_cmd(update: Update, ctx: CallbackContext):
 
     p = get_pending(key)
     if not p:
-        update.message.reply_text("No pending SSH request. Use /ssh first. / ابتدا از /ssh استفاده کنید.")
+        update.message.reply_text("اول /ssh یا دکمه اتصال رو بزن.")
         return
-
     if not ctx.args:
-        update.message.reply_text("Usage: /pass <password> / نحوه استفاده: /pass <رمز>")
+        update.message.reply_text("Usage: /pass <password>")
         return
 
     pwd = " ".join(ctx.args)
 
-    # delete the message that contained the password if possible
     try:
         update.message.delete()
     except Exception:
-        try:
-            ctx.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-        except Exception:
-            logger.debug("Couldn't delete password message")
+        pass
 
-    # stop any previous session for this user
     stop_session(key)
-
     sess = SSHSession(key, ctx.bot)
     with STATE_LOCK:
         SESSIONS[key] = sess
@@ -1082,24 +1062,21 @@ def pass_cmd(update: Update, ctx: CallbackContext):
     if not ok:
         with STATE_LOCK:
             SESSIONS.pop(key, None)
-        update.message.reply_text(f"Connection failed: {err} / اتصال ناموفق: {err}")
+        update.message.reply_text(f"❌ اتصال ناموفق: {err}")
     else:
-        update.message.reply_text("Connected. Terminal is shown above. / متصل شد.")
+        update.message.reply_text("✅ وصل شدی.")
 
 def stop_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
     key = session_key_from_update(update)
-    s_existed = stop_session(key)
-    if s_existed:
-        update.message.reply_text("Stopped SSH session. / سشن قطع شد.")
-    else:
-        update.message.reply_text("No active SSH session found. / سشن فعالی یافت نشد.")
+    stopped = stop_session(key)
+    update.message.reply_text("✅ قطع شد." if stopped else "سشن فعالی نیست.")
 
 def text_msg(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
-    # First: wizard flow
+
     if wizard_process_text(update, ctx):
         return
 
@@ -1108,226 +1085,174 @@ def text_msg(update: Update, ctx: CallbackContext):
     if not s:
         return
 
-    # remove user's message for privacy
     try:
         ctx.bot.delete_message(update.effective_chat.id, update.message.message_id)
     except Exception:
         pass
 
-    text = update.message.text or ""
-    s.send(text + "\n")
+    s.send((update.message.text or "") + "\n")
 
 def cb(update: Update, ctx: CallbackContext):
     q = update.callback_query
     if not q:
         return
 
-    chat_id = q.message.chat_id
-    user_id = q.from_user.id
+    # auth checks
     if PRIVATE_ONLY:
         try:
             if q.message.chat.type != "private":
-                q.answer("⛔ فقط در چت خصوصی.", show_alert=True)
+                q.answer("⛔ فقط خصوصی", show_alert=True)
                 return
         except Exception:
             pass
-    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-        q.answer("⛔ دسترسی نداری.", show_alert=True)
+    if ALLOWED_USERS and q.from_user.id not in ALLOWED_USERS:
+        q.answer("⛔ دسترسی نداری", show_alert=True)
         return
-    if ALLOWED_CHATS and chat_id not in ALLOWED_CHATS:
-        q.answer("⛔ دسترسی نداری.", show_alert=True)
+    if ALLOWED_CHATS and q.message.chat_id not in ALLOWED_CHATS:
+        q.answer("⛔ دسترسی نداری", show_alert=True)
         return
 
     key = session_key_from_query(update)
+    chat_id, user_id = key
     data = q.data or ""
 
-    # WIZARD actions
+    # wizard cancel
     if data == "W:CANCEL":
         clear_wizard(key)
-        try:
-            q.answer("لغو شد.")
-        except Exception:
-            pass
-        try:
-            ctx.bot.send_message(chat_id, "❌ عملیات لغو شد.", reply_markup=keyboard_main(user_id))
-        except Exception:
-            pass
+        q.answer("لغو شد")
+        ctx.bot.send_message(chat_id, "❌ لغو شد.", reply_markup=keyboard_main(user_id))
         return
 
-    # MENU actions
+    # menu
     if data == "M:MENU":
-        try:
-            q.edit_message_text(
-                "منو اصلی:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard_main(user_id),
-                disable_web_page_preview=True,
-            )
-        except Exception:
-            pass
-        try:
-            q.answer()
-        except Exception:
-            pass
+        q.edit_message_text("منو:", reply_markup=keyboard_main(user_id))
+        q.answer()
         return
 
     if data == "M:HELP":
-        try:
-            q.answer()
-        except Exception:
-            pass
-        ctx.bot.send_message(chat_id, "برای راهنما /help رو بزن ✅")
+        q.answer()
+        ctx.bot.send_message(chat_id, "راهنما: /help")
+        return
+
+    if data == "M:MYID":
+        q.answer()
+        ctx.bot.send_message(chat_id, f"🆔 User ID: {user_id}\n🧾 Chat ID: {chat_id}")
         return
 
     if data == "M:STATUS":
         s = get_session(key)
         if not s:
-            q.answer("سشن فعال نیست.")
+            q.answer("سشن فعال نیست")
             return
         uptime = int(now_ts() - s.connected_at)
         idle = int(now_ts() - s.last_activity)
         q.answer("OK")
-        ctx.bot.send_message(
-            chat_id,
-            f"📊 وضعیت:\nTarget: {s.target}\nUptime: {uptime}s\nIdle: {idle}s",
-        )
+        ctx.bot.send_message(chat_id, f"📊 وضعیت:\nTarget: {s.target}\nUptime: {uptime}s\nIdle: {idle}s")
         return
 
     if data == "M:STOP":
         stopped = stop_session(key)
         clear_wizard(key)
-        try:
-            q.answer("قطع شد." if stopped else "سشن فعالی نیست.")
-        except Exception:
-            pass
+        q.answer("قطع شد" if stopped else "سشن فعالی نیست")
         return
 
     if data == "M:CONNECT":
-        try:
-            q.answer()
-        except Exception:
-            pass
+        q.answer()
         wizard_ask_target(update, ctx)
         return
 
     if data == "M:ADD_SERVER":
-        try:
-            q.answer()
-        except Exception:
-            pass
+        q.answer()
         wizard_start_add_server(update, ctx)
         return
 
     if data == "M:SERVERS":
         try:
-            q.edit_message_text(
-                "📚 سرورهای شما:",
-                parse_mode=ParseMode.HTML,
-                reply_markup=keyboard_servers_list(user_id),
-                disable_web_page_preview=True,
-            )
+            q.edit_message_text("📚 سرورهای شما:", reply_markup=keyboard_servers_list(user_id))
         except Exception:
             ctx.bot.send_message(chat_id, "📚 سرورهای شما:", reply_markup=keyboard_servers_list(user_id))
-        try:
-            q.answer()
-        except Exception:
-            pass
+        q.answer()
         return
 
-    # Server profiles actions
+    # server actions
     if data.startswith("SV:OPEN:"):
-        name = urlunquote(data.split("SV:OPEN:", 1)[1])
+        sid = data.split("SV:OPEN:", 1)[1]
         servers = get_user_servers(user_id)
-        if name not in servers:
-            q.answer("پیدا نشد.", show_alert=True)
+        info = servers.get(sid)
+        if not isinstance(info, dict):
+            q.answer("پیدا نشد", show_alert=True)
             return
-        info = servers[name]
-        user = info.get("user", "")
-        host = info.get("host", "")
-        port = info.get("port", 22)
-        default = get_user_default_server(user_id)
-        star = "⭐ " if name == default else ""
-        text = (
-            f"{star}<b>{html.escape(name)}</b>\n"
-            f"<code>{html.escape(str(user))}@{html.escape(str(host))}:{int(port)}</code>"
-        )
-        try:
-            q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard_server_actions(name))
-        except Exception:
-            ctx.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=keyboard_server_actions(name))
-        try:
-            q.answer()
-        except Exception:
-            pass
-        return
-
-    if data.startswith("SV:CONNECT:"):
-        name = urlunquote(data.split("SV:CONNECT:", 1)[1])
-        servers = get_user_servers(user_id)
-        if name not in servers:
-            q.answer("پیدا نشد.", show_alert=True)
-            return
-        info = servers[name]
+        name = str(info.get("name", sid))
         user = str(info.get("user", ""))
         host = str(info.get("host", ""))
         port = int(info.get("port", 22))
+        default_id = get_user_default_server_id(user_id)
+        star = "⭐ " if sid == default_id else ""
+        text = f"{star}<b>{html.escape(name)}</b>\n<code>{html.escape(user)}@{html.escape(host)}:{port}</code>"
+        q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard_server_actions(sid))
+        q.answer()
+        return
 
-        # mark last used
+    if data.startswith("SV:CONNECT:"):
+        sid = data.split("SV:CONNECT:", 1)[1]
+        servers = get_user_servers(user_id)
+        info = servers.get(sid)
+        if not isinstance(info, dict):
+            q.answer("پیدا نشد", show_alert=True)
+            return
         info["last_used"] = int(now_ts())
-        servers[name] = info
+        servers[sid] = info
         set_user_servers(user_id, servers)
 
-        set_pending(key, PendingConn(user=user, host=host, port=port, server_name=name))
-        try:
-            q.answer("پسورد رو بفرست…")
-        except Exception:
-            pass
+        set_pending(key, PendingConn(
+            user=str(info.get("user", "")),
+            host=str(info.get("host", "")),
+            port=int(info.get("port", 22)),
+            server_id=sid
+        ))
+        q.answer("پسورد رو بفرست…")
         wizard_ask_password(ctx, key)
         return
 
     if data.startswith("SV:DELETE:"):
-        name = urlunquote(data.split("SV:DELETE:", 1)[1])
+        sid = data.split("SV:DELETE:", 1)[1]
         servers = get_user_servers(user_id)
-        if name not in servers:
-            q.answer("پیدا نشد.", show_alert=True)
+        if sid not in servers:
+            q.answer("پیدا نشد", show_alert=True)
             return
-        servers.pop(name, None)
-        set_user_servers(user_id, servers)
-        if get_user_default_server(user_id) == name:
-            set_user_default_server(user_id, "")
+        servers.pop(sid, None)
+        default_id = get_user_default_server_id(user_id)
+        if default_id == sid:
+            set_user_servers(user_id, servers, default_id="")
+        else:
+            set_user_servers(user_id, servers)
+        q.answer("حذف شد")
         try:
-            q.answer("حذف شد.")
-        except Exception:
-            pass
-        try:
-            q.edit_message_text("🗑 حذف شد. لیست سرورها:", parse_mode=ParseMode.HTML, reply_markup=keyboard_servers_list(user_id))
+            q.edit_message_text("📚 سرورهای شما:", reply_markup=keyboard_servers_list(user_id))
         except Exception:
             pass
         return
 
     if data.startswith("SV:DEFAULT:"):
-        name = urlunquote(data.split("SV:DEFAULT:", 1)[1])
+        sid = data.split("SV:DEFAULT:", 1)[1]
         servers = get_user_servers(user_id)
-        if name not in servers:
-            q.answer("پیدا نشد.", show_alert=True)
+        if sid not in servers:
+            q.answer("پیدا نشد", show_alert=True)
             return
-        set_user_default_server(user_id, name)
+        set_user_default_server_id(user_id, sid)
+        q.answer("پیش‌فرض شد ⭐")
         try:
-            q.answer("پیش‌فرض شد ⭐")
-        except Exception:
-            pass
-        try:
-            q.edit_message_text("📚 سرورهای شما:", parse_mode=ParseMode.HTML, reply_markup=keyboard_servers_list(user_id))
+            q.edit_message_text("📚 سرورهای شما:", reply_markup=keyboard_servers_list(user_id))
         except Exception:
             pass
         return
 
-    # Terminal actions
+    # terminal UI
     s = get_session(key)
 
     if data.startswith("KB:PAGE:"):
         if not s:
-            q.answer("سشن فعال نیست.")
+            q.answer("سشن فعال نیست")
             return
         try:
             page = int(data.split(":", 2)[2])
@@ -1338,91 +1263,60 @@ def cb(update: Update, ctx: CallbackContext):
             ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=q.message.message_id, reply_markup=s.keyboard())
         except Exception:
             pass
-        try:
-            q.answer()
-        except Exception:
-            pass
+        q.answer()
         return
 
-    if data.startswith("A:STOP"):
+    if data == "A:STOP":
         stopped = stop_session(key)
-        try:
-            q.answer("قطع شد." if stopped else "سشن فعال نیست.")
-        except Exception:
-            pass
+        q.answer("قطع شد" if stopped else "سشن فعال نیست")
         return
 
-    if data.startswith("A:SERVERS"):
-        try:
-            q.answer()
-        except Exception:
-            pass
-        ctx.bot.send_message(chat_id, "📚 سرورهای شما:", reply_markup=keyboard_servers_list(user_id))
+    if data == "A:SERVERS":
+        q.answer()
+        ctx.bot.send_message(chat_id, "📚 سرورها:", reply_markup=keyboard_servers_list(user_id))
         return
 
     if data.startswith("K:"):
         if not s:
-            try:
-                q.answer("No active session. / سشن فعال نیست.")
-            except Exception:
-                pass
-            try:
-                ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=q.message.message_id, reply_markup=None)
-            except Exception:
-                pass
+            q.answer("سشن فعال نیست")
             return
-
         keyname = data[2:]
         val = KEYS.get(keyname)
         if val is not None:
             s.send(val)
-        try:
-            q.answer()
-        except Exception:
-            pass
+        q.answer()
         return
 
     if data.startswith("MC:"):
         if not s:
-            q.answer("سشن فعال نیست.")
+            q.answer("سشن فعال نیست")
             return
         mname = data.split("MC:", 1)[1]
         seq = MACROS.get(mname, "")
         if seq:
             s.send(seq)
-        try:
-            q.answer()
-        except Exception:
-            pass
+        q.answer()
         return
 
     if data.startswith("QC:"):
         if not s:
-            q.answer("سشن فعال نیست.")
+            q.answer("سشن فعال نیست")
             return
         cname = data.split("QC:", 1)[1]
         cmd = QUICK_CMDS.get(cname, "")
         if cmd:
             s.send(cmd)
-        try:
-            q.answer()
-        except Exception:
-            pass
+        q.answer()
         return
 
-    try:
-        q.answer()
-    except Exception:
-        pass
+    q.answer()
 
-
-# ---------- modifier commands kept ----------
+# modifier commands (kept)
 def process_modifier_command(primary_mod: str, update: Update, ctx: CallbackContext):
     key = session_key_from_update(update)
     chat_id, user_id = key
     s = get_session(key)
 
-    # try to delete the command message for privacy
     try:
         update.message.delete()
     except Exception:
@@ -1437,7 +1331,7 @@ def process_modifier_command(primary_mod: str, update: Update, ctx: CallbackCont
     mods, keytok = parse_combo_tokens(merged_tokens)
     seq = build_sequence_from_mods_and_key(mods, keytok)
     if not seq:
-        update.message.reply_text("Could not parse key. Usage: /ctrl c   or /ctrl alt c   or /keys ctrl+alt+c\n/ نتوانست کلید را پردازش کند.")
+        update.message.reply_text("Could not parse key. Usage: /ctrl c  or /keys ctrl+alt+c")
         return
 
     s.send(seq)
@@ -1469,7 +1363,6 @@ def keys_cmd(update: Update, ctx: CallbackContext):
     chat_id, user_id = key
     s = get_session(key)
 
-    # delete command message for privacy
     try:
         update.message.delete()
     except Exception:
@@ -1481,22 +1374,16 @@ def keys_cmd(update: Update, ctx: CallbackContext):
 
     tokens = ctx.args or []
     if not tokens:
-        update.message.reply_text("Usage: /keys ctrl+alt+c or /keys ctrl alt c\n/ نحوه استفاده: /keys ctrl+alt+c")
+        update.message.reply_text("Usage: /keys ctrl+alt+c")
         return
 
     mods, keytok = parse_combo_tokens(tokens)
     seq = build_sequence_from_mods_and_key(mods, keytok)
     if not seq:
-        update.message.reply_text("Could not parse key. / نتوانست کلید را پردازش کند.")
+        update.message.reply_text("Could not parse key.")
         return
 
     s.send(seq)
-    try:
-        if s.message_id:
-            ctx.bot.edit_message_reply_markup(chat_id=chat_id, message_id=s.message_id, reply_markup=s.keyboard())
-    except Exception:
-        pass
-
 
 # ================= MAIN =================
 def main():
@@ -1510,18 +1397,17 @@ def main():
     dp.add_handler(CommandHandler("start", start_cmd))
     dp.add_handler(CommandHandler("menu", menu_cmd))
     dp.add_handler(CommandHandler("help", help_cmd))
+    dp.add_handler(CommandHandler("id", id_cmd))
     dp.add_handler(CommandHandler("status", status_cmd))
 
     dp.add_handler(CommandHandler("servers", servers_cmd))
     dp.add_handler(CommandHandler("addserver", addserver_cmd))
     dp.add_handler(CommandHandler("delserver", delserver_cmd))
 
-    # legacy commands
     dp.add_handler(CommandHandler("ssh", ssh_cmd))
     dp.add_handler(CommandHandler("pass", pass_cmd))
     dp.add_handler(CommandHandler("stop", stop_cmd))
 
-    # modifier commands
     dp.add_handler(CommandHandler("ctrl", ctrl_cmd))
     dp.add_handler(CommandHandler("alt", alt_cmd))
     dp.add_handler(CommandHandler("shift", shift_cmd))
