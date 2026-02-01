@@ -1,0 +1,29 @@
+sudo systemctl stop sshbot
+
+# مطمئن شو پوشه‌ها دست sshbot باشن
+sudo chown -R sshbot:sshbot /opt/sshbot /var/log/ssh-bot 2>/dev/null || true
+
+# venv خراب رو پاک کن و از نو بساز
+sudo rm -rf /opt/sshbot/venv
+sudo -u sshbot -H python3 -m venv /opt/sshbot/venv
+
+# ابزارهای پایه
+sudo -u sshbot -H /opt/sshbot/venv/bin/pip install -U pip wheel setuptools
+
+# دیپندنسی‌ها (urllib3<2 خیلی مهمه)
+sudo -u sshbot -H /opt/sshbot/venv/bin/pip install \
+  "python-telegram-bot==13.15" \
+  "urllib3<2" \
+  certifi \
+  paramiko \
+  pyte
+
+# تست ایمپورت
+sudo -u sshbot -H /opt/sshbot/venv/bin/python -c "import urllib3, telegram; print('IMPORT OK')"
+
+# راه‌اندازی دوباره
+sudo systemctl restart sshbot
+sudo systemctl status sshbot --no-pager
+
+# اگر خواستی لاگ رو ببینی
+journalctl -u sshbot -n 80 --no-pager
