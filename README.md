@@ -45,4 +45,4 @@ Try the demo bot here:
 Run this command on your server:
 
 ```bash
-curl -fsSL https://github.com/ItzGlace/SSHBot/raw/refs/heads/main/install.sh | sudo bash
+curl -fsSL https://github.com/0fariid0/SSHBot/raw/refs/heads/main/install.sh | sudo bash
