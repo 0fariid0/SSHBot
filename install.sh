@@ -98,7 +98,7 @@ import posixpath
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, List, Optional, Any
 
-BOT_VERSION = "SSHBot Pro v4.0.0 - Real SSH Keychain + Multi Upload"
+BOT_VERSION = "SSHBot Pro v5.0.0 - Real Keychain + Bottom Terminal Fix"
 
 import paramiko
 from paramiko.ssh_exception import SSHException, PasswordRequiredException
@@ -850,6 +850,7 @@ class SSHSession:
         self.stream = pyte.Stream(self.screen)
 
         self.message_id: Optional[int] = None
+        self.msg_lock = threading.RLock()
         self.last_render = ""
         self.last_sent = ""
 
@@ -897,14 +898,16 @@ class SSHSession:
             self.chan = self.client.invoke_shell(width=TERM_COLS, height=TERM_LINES)
             self.chan.settimeout(0)
 
-            msg = self.bot.send_message(
-                self.chat_id,
-                text=html_pre(f"Connecting with {auth_label}..."),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self.keyboard(),
-                disable_web_page_preview=True,
-            )
-            self.message_id = msg.message_id
+            with self.msg_lock:
+                msg = self.bot.send_message(
+                    self.chat_id,
+                    text=html_pre(f"Connecting with {auth_label}..."),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self.keyboard(),
+                    disable_web_page_preview=True,
+                )
+                self.message_id = msg.message_id
+                self.last_sent = clamp_tg(f"Connecting with {auth_label}...")
 
             self.thread = threading.Thread(target=self.loop, daemon=True)
             self.thread.start()
@@ -956,17 +959,51 @@ class SSHSession:
             return
 
         try:
-            self.bot.edit_message_text(
-                chat_id=self.chat_id,
-                message_id=self.message_id,
-                text=html_pre(safe),
-                parse_mode=ParseMode.HTML,
-                reply_markup=self.keyboard(),
-                disable_web_page_preview=True,
-            )
-            self.last_sent = safe
+            with self.msg_lock:
+                if not self.message_id:
+                    return
+                self.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=self.message_id,
+                    text=html_pre(safe),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self.keyboard(),
+                    disable_web_page_preview=True,
+                )
+                self.last_sent = safe
         except Exception as e:
             logger.debug("Edit failed: %s", e)
+
+    def _current_safe_terminal_text(self) -> str:
+        text = self.last_render or "\n".join(self.screen.display).rstrip()
+        if not text:
+            text = f"Connected to {self.target}" if self.target else "SSH session"
+        return clamp_tg(text)
+
+    def bump_to_bottom(self) -> bool:
+        """Telegram cannot move a message down, so recreate the terminal message as the latest message."""
+        try:
+            with self.msg_lock:
+                safe = self._current_safe_terminal_text()
+                old_id = self.message_id
+                msg = self.bot.send_message(
+                    self.chat_id,
+                    text=html_pre(safe),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=self.keyboard(),
+                    disable_web_page_preview=True,
+                )
+                self.message_id = msg.message_id
+                self.last_sent = safe
+                if old_id and old_id != self.message_id:
+                    try:
+                        self.bot.delete_message(chat_id=self.chat_id, message_id=old_id)
+                    except Exception:
+                        pass
+            return True
+        except Exception as e:
+            logger.debug("Could not bump terminal to bottom: %s", e)
+            return False
 
     def send(self, text: str):
         try:
@@ -1119,15 +1156,16 @@ class SSHSession:
             pass
 
         try:
-            if self.message_id:
-                self.bot.edit_message_text(
-                    chat_id=self.chat_id,
-                    message_id=self.message_id,
-                    text=html_pre("Session closed"),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=None,
-                    disable_web_page_preview=True,
-                )
+            with self.msg_lock:
+                if self.message_id:
+                    self.bot.edit_message_text(
+                        chat_id=self.chat_id,
+                        message_id=self.message_id,
+                        text=html_pre("Session closed"),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=None,
+                        disable_web_page_preview=True,
+                    )
         except Exception as e:
             logger.debug("Could not update closed message: %s", e)
 
@@ -1137,6 +1175,14 @@ class SSHSession:
 def get_session(key: SessionKey) -> Optional[SSHSession]:
     with STATE_LOCK:
         return SESSIONS.get(key)
+
+def bump_terminal_to_bottom(key: SessionKey) -> None:
+    s = get_session(key)
+    if s and s.message_id:
+        try:
+            s.bump_to_bottom()
+        except Exception:
+            logger.debug("terminal bump failed", exc_info=True)
 
 def stop_session(key: SessionKey) -> bool:
     with STATE_LOCK:
@@ -1366,6 +1412,7 @@ def wizard_ask_upload_dir(update: Update, ctx: CallbackContext):
         reply_markup=keyboard_wizard_cancel(),
     )
     set_wizard(key, WizardState(step="UPLOAD_DIR", prompt_msg_id=prompt.message_id))
+    bump_terminal_to_bottom(key)
 
 def wizard_receive_private_key_text(update: Update, ctx: CallbackContext, private_key_text: str) -> bool:
     key = session_key_from_update(update)
@@ -1457,7 +1504,8 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
         if not ok:
             ctx.bot.send_message(chat_id, f"❌ اتصال ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
         else:
-            ctx.bot.send_message(chat_id, f"✅ وصل شدی به <b>{html.escape(sess.target)}</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard_main(user_id))
+            # Terminal message is already the latest message; don't send a success message below it.
+            pass
         return True
 
     if st.step == "KEYCHAIN_USER":
@@ -1514,7 +1562,8 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
         if not ok:
             ctx.bot.send_message(chat_id, f"❌ اتصال Keychain ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
         else:
-            ctx.bot.send_message(chat_id, f"✅ با Keychain وصل شدی به <b>{html.escape(sess.target)}</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard_main(user_id))
+            # Terminal message is already the latest message; don't send a success message below it.
+            pass
         return True
 
     if st.step == "SET_SERVER_PASSWORD":
@@ -1626,6 +1675,7 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
         set_upload(key, remote_dir)
         clear_wizard(key)
         ctx.bot.send_message(chat_id, f"✅ حالت آپلود فعال شد. مقصد: <code>{html.escape(remote_dir)}</code>\nحالا یک یا چند فایل را بفرست. برای پایان: /done", parse_mode=ParseMode.HTML)
+        bump_terminal_to_bottom(key)
         return True
 
     if st.step == "ADD_SERVER_NAME":
@@ -1743,6 +1793,7 @@ def servers_cmd(update: Update, ctx: CallbackContext):
         return
     user_id = update.effective_user.id
     update.message.reply_text("📚 سرورهای شما:", reply_markup=keyboard_servers_list(user_id))
+    bump_terminal_to_bottom(session_key_from_update(update))
 
 def addserver_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -1878,7 +1929,8 @@ def quickssh_cmd(update: Update, ctx: CallbackContext):
     if not ok:
         update.message.reply_text(f"❌ اتصال Keychain ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
     else:
-        update.message.reply_text(f"✅ با Keychain وصل شدی به <b>{html.escape(sess.target)}</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard_main(user_id))
+        # Terminal message is already the latest message; don't send a success message below it.
+        pass
 
 def upload_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -1890,6 +1942,7 @@ def upload_cmd(update: Update, ctx: CallbackContext):
     remote_dir = " ".join(ctx.args).strip() if ctx.args else "."
     set_upload(key, remote_dir or ".")
     update.message.reply_text(f"✅ حالت آپلود فعال شد. مقصد: <code>{html.escape(remote_dir or '.')}</code>\nحالا یک یا چند فایل را بفرست. برای پایان: /done", parse_mode=ParseMode.HTML)
+    bump_terminal_to_bottom(key)
 
 def done_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -1898,6 +1951,7 @@ def done_cmd(update: Update, ctx: CallbackContext):
     st = get_upload(key)
     clear_upload(key)
     update.message.reply_text(f"✅ آپلود تمام شد. تعداد فایل‌های آپلودشده: {st.count if st else 0}")
+    bump_terminal_to_bottom(key)
 
 def status_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -1910,6 +1964,7 @@ def status_cmd(update: Update, ctx: CallbackContext):
     uptime = int(now_ts() - s.connected_at)
     idle = int(now_ts() - s.last_activity)
     update.message.reply_text(f"📊 وضعیت:\nTarget: {s.target}\nUptime: {uptime}s\nIdle: {idle}s")
+    bump_terminal_to_bottom(key)
 
 def ssh_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -1959,7 +2014,8 @@ def pass_cmd(update: Update, ctx: CallbackContext):
     if not ok:
         update.message.reply_text(f"❌ اتصال ناموفق: {err}")
     else:
-        update.message.reply_text("✅ وصل شدی.")
+        # Terminal message is already the latest message; don't send a success message below it.
+        pass
 
 def stop_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -2059,6 +2115,7 @@ def document_msg(update: Update, ctx: CallbackContext):
             status.edit_text(f"✅ آپلود شد:\n<code>{html.escape(remote_path)}</code>", parse_mode=ParseMode.HTML)
         except Exception:
             update.message.reply_text(f"✅ آپلود شد:\n<code>{html.escape(remote_path)}</code>", parse_mode=ParseMode.HTML)
+        bump_terminal_to_bottom(key)
         if DELETE_UPLOADED_TG_MESSAGE:
             try:
                 msg.delete()
@@ -2070,6 +2127,7 @@ def document_msg(update: Update, ctx: CallbackContext):
             status.edit_text(f"❌ آپلود ناموفق:\n<code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
         except Exception:
             update.message.reply_text(f"❌ آپلود ناموفق: {e}")
+        bump_terminal_to_bottom(key)
     finally:
         try:
             if os.path.exists(local_path):
@@ -2194,6 +2252,7 @@ def cb(update: Update, ctx: CallbackContext):
     if data == "M:HELP":
         q.answer()
         ctx.bot.send_message(chat_id, "راهنما: /help")
+        bump_terminal_to_bottom(key)
         return
 
     if data == "M:MYID":
@@ -2210,6 +2269,7 @@ def cb(update: Update, ctx: CallbackContext):
         idle = int(now_ts() - s.last_activity)
         q.answer("OK")
         ctx.bot.send_message(chat_id, f"📊 وضعیت:\nTarget: {s.target}\nUptime: {uptime}s\nIdle: {idle}s")
+        bump_terminal_to_bottom(key)
         return
 
     if data == "M:STOP":
@@ -2249,6 +2309,7 @@ def cb(update: Update, ctx: CallbackContext):
         except Exception:
             ctx.bot.send_message(chat_id, "📚 سرورهای شما:", reply_markup=keyboard_servers_list(user_id))
         q.answer()
+        bump_terminal_to_bottom(key)
         return
 
     # server actions
@@ -2292,7 +2353,8 @@ def cb(update: Update, ctx: CallbackContext):
             if not ok:
                 ctx.bot.send_message(chat_id, f"❌ اتصال Keychain ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
             else:
-                ctx.bot.send_message(chat_id, f"✅ وصل شدی به <b>{html.escape(sess.target)}</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard_main(user_id))
+                # Terminal message is already the latest message; don't send a success message below it.
+                pass
             return
         set_pending(key, PendingConn(user=user, host=host, port=port, server_id=sid))
         q.answer("پسورد رو بفرست…")
@@ -2404,6 +2466,7 @@ def cb(update: Update, ctx: CallbackContext):
     if data == "A:SERVERS":
         q.answer()
         ctx.bot.send_message(chat_id, "📚 سرورها:", reply_markup=keyboard_servers_list(user_id))
+        bump_terminal_to_bottom(key)
         return
 
     if data == "A:UPLOAD":
@@ -2594,7 +2657,7 @@ chmod 600 "$ENV_FILE"
 say "⚙️  Creating systemd service..."
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF_SERVICE
 [Unit]
-Description=Telegram SSH Bot (SSHBot v4)
+Description=Telegram SSH Bot (SSHBot v5)
 After=network-online.target
 Wants=network-online.target
 
@@ -2623,7 +2686,7 @@ systemctl restart "$SERVICE_NAME"
 sleep 2
 
 if systemctl is-active --quiet "$SERVICE_NAME"; then
-  say "✅ SSHBot v4 installed and running."
+  say "✅ SSHBot v5 installed and running."
   say "Check version in Telegram with: /version"
   say "Logs: journalctl -u $SERVICE_NAME -n 80 --no-pager"
 else
