@@ -16,7 +16,6 @@ sudo -u sshbot -H /opt/sshbot/venv/bin/pip install \
   "urllib3<2" \
   certifi \
   paramiko \
-  cryptography \
   pyte
 
 # تست ایمپورت
