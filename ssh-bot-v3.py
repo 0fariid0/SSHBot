@@ -1,86 +1,3 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-APP_USER="${APP_USER:-sshbot}"
-INSTALL_DIR="${INSTALL_DIR:-/opt/sshbot}"
-DATA_DIR="${DATA_DIR:-$INSTALL_DIR/data}"
-LOG_DIR="${LOG_DIR:-/var/log/ssh-bot}"
-SERVICE_NAME="${SERVICE_NAME:-sshbot}"
-ENV_FILE="${ENV_FILE:-/etc/sshbot.env}"
-
-say() { echo -e "$*"; }
-fail() { echo "❌ $*" >&2; exit 1; }
-
-say "========================================="
-say " SSHBot Installer (v4 - Real SSH Keychain + Upload)"
-say "========================================="
-
-if [ "$(id -u)" -ne 0 ]; then
-  fail "Run as root or use sudo"
-fi
-
-if [ -z "${BOT_TOKEN:-}" ]; then
-  if [ -f "$ENV_FILE" ]; then
-    # shellcheck disable=SC1090
-    set +u
-    . "$ENV_FILE" || true
-    set -u
-  fi
-fi
-
-if [ -z "${BOT_TOKEN:-}" ]; then
-  if [ -e /dev/tty ]; then
-    printf "Enter Telegram Bot Token: " > /dev/tty
-    IFS= read -r BOT_TOKEN < /dev/tty || true
-  fi
-fi
-
-if [ -z "${BOT_TOKEN:-}" ]; then
-  fail "Bot token cannot be empty. Use: sudo BOT_TOKEN='TOKEN' bash install.sh"
-fi
-
-say "👤 Ensuring service user exists..."
-if ! id "$APP_USER" >/dev/null 2>&1; then
-  useradd --system --home "$INSTALL_DIR" --shell /usr/sbin/nologin "$APP_USER"
-fi
-
-say "📦 Installing system dependencies..."
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update -y
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip ca-certificates curl
-elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y python3 python3-pip ca-certificates curl
-elif command -v yum >/dev/null 2>&1; then
-  yum install -y python3 python3-pip ca-certificates curl
-else
-  say "⚠️  Unknown package manager; assuming Python 3 and venv are already installed."
-fi
-
-say "📁 Creating directories..."
-mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$LOG_DIR" "$DATA_DIR/uploads"
-chown -R "$APP_USER:$APP_USER" "$INSTALL_DIR" "$LOG_DIR"
-chmod 700 "$DATA_DIR" || true
-
-say "🐍 Creating virtualenv (as $APP_USER)..."
-if [ ! -x "$INSTALL_DIR/venv/bin/python" ]; then
-  runuser -u "$APP_USER" -- python3 -m venv "$INSTALL_DIR/venv"
-else
-  say "ℹ️ venv already exists: $INSTALL_DIR/venv"
-fi
-
-say "📦 Installing Python packages (as $APP_USER)..."
-runuser -u "$APP_USER" -- "$INSTALL_DIR/venv/bin/python" -m ensurepip --upgrade || true
-runuser -u "$APP_USER" -- "$INSTALL_DIR/venv/bin/python" -m pip install -U --force-reinstall pip wheel "setuptools<81"
-runuser -u "$APP_USER" -- "$INSTALL_DIR/venv/bin/python" -m pip install -U \
-  "setuptools<81" \
-  "APScheduler==3.6.3" \
-  "tzlocal<3" \
-  "urllib3<2" \
-  "python-telegram-bot==13.15" \
-  certifi paramiko cryptography pyte
-
-say "⬇️  Deploying SSHBot v4..."
-cat > "$INSTALL_DIR/ssh-bot.py" <<'PYBOT_EMBEDDED_SOURCE'
 #!/usr/bin/env python3
 import os
 import sys
@@ -91,17 +8,15 @@ import logging
 import logging.handlers
 import re
 import html
-import io
 import secrets
 import tempfile
 import posixpath
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, List, Optional, Any
 
-BOT_VERSION = "SSHBot Pro v4.0.0 - Real SSH Keychain + Multi Upload"
+BOT_VERSION = "SSHBot Pro v3.0.0 - Keychain + Multi Upload"
 
 import paramiko
-from paramiko.ssh_exception import SSHException, PasswordRequiredException
 import pyte
 
 try:
@@ -521,8 +436,6 @@ def _get_fernet():
     return _FERNET_CACHE
 
 def encrypt_secret(secret: str) -> str:
-    if secret is None:
-        secret = ""
     if not secret:
         return ""
     token = _get_fernet().encrypt(secret.encode("utf-8"))
@@ -541,109 +454,18 @@ def decrypt_secret(value: str) -> str:
 def keychain_available() -> bool:
     return KEYCHAIN_ENABLED and Fernet is not None
 
-def normalize_private_key_text(private_key: str) -> str:
-    private_key = (private_key or "").strip()
-    if "\\n" in private_key and "\n" not in private_key:
-        private_key = private_key.replace("\\n", "\n")
-    private_key = private_key.replace("\r\n", "\n").replace("\r", "\n").strip()
-    return private_key + "\n" if private_key else ""
-
-def looks_like_private_key(private_key: str) -> bool:
-    private_key = normalize_private_key_text(private_key)
-    return "-----BEGIN" in private_key and "PRIVATE KEY-----" in private_key and "-----END" in private_key
-
-def _key_classes():
-    classes = []
-    for name in ("Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey"):
-        cls = getattr(paramiko, name, None)
-        if cls is not None:
-            classes.append(cls)
-    return classes
-
-def probe_private_key_text(private_key: str) -> Tuple[str, bool]:
-    """Return (key_type, needs_passphrase)."""
-    private_key = normalize_private_key_text(private_key)
-    if not looks_like_private_key(private_key):
-        raise RuntimeError("این متن شبیه Private Key نیست. باید با -----BEGIN ... PRIVATE KEY----- شروع شود.")
-    saw_password_required = False
-    errors: List[str] = []
-    for cls in _key_classes():
-        try:
-            cls.from_private_key(io.StringIO(private_key), password=None)
-            return cls.__name__.replace("Key", ""), False
-        except PasswordRequiredException:
-            saw_password_required = True
-        except SSHException as e:
-            errors.append(f"{cls.__name__}: {e}")
-        except Exception as e:
-            errors.append(f"{cls.__name__}: {e}")
-    if saw_password_required:
-        return "encrypted", True
-    raise RuntimeError("Private Key خوانده نشد. کلید باید OpenSSH/RSA/ECDSA/ED25519 معتبر باشد.")
-
-def load_private_key_from_text(private_key: str, passphrase: str = ""):
-    private_key = normalize_private_key_text(private_key)
-    if not looks_like_private_key(private_key):
-        raise RuntimeError("Private Key معتبر نیست.")
-    password = passphrase or None
-    errors: List[str] = []
-    saw_password_required = False
-    for cls in _key_classes():
-        try:
-            pkey = cls.from_private_key(io.StringIO(private_key), password=password)
-            return pkey, cls.__name__.replace("Key", "")
-        except PasswordRequiredException:
-            saw_password_required = True
-        except SSHException as e:
-            errors.append(f"{cls.__name__}: {e}")
-        except Exception as e:
-            errors.append(f"{cls.__name__}: {e}")
-    if saw_password_required:
-        raise RuntimeError("این Private Key رمز دارد؛ Passphrase درست را وارد کن.")
-    if password:
-        raise RuntimeError("Private Key با این Passphrase باز نشد. Passphrase را دوباره چک کن.")
-    raise RuntimeError("Private Key خوانده نشد. فرمت یا متن کلید درست نیست.")
-
-def normalize_passphrase_text(text: str) -> str:
-    t = (text or "").strip()
-    if t in (".", "-", "_", "none", "None", "no", "NO", "بدون", "ندارد"):
-        return ""
-    return t
-
-def set_user_keychain_default_password(user_id: int, username: str, password: str) -> None:
+def set_user_keychain_default(user_id: int, username: str, password: str) -> None:
     db = load_server_db()
     _migrate_if_needed(db, user_id)
     rec = _ensure_user_record(db, user_id)
     rec["keychain_default"] = {
-        "auth": "password",
         "user": username,
         "secret": encrypt_secret(password),
         "updated_at": int(now_ts()),
     }
     save_server_db(db)
 
-# Backward compatible name from v3; password vault, not real SSH Keychain.
-def set_user_keychain_default(user_id: int, username: str, password: str) -> None:
-    set_user_keychain_default_password(user_id, username, password)
-
-def set_user_keychain_default_key(user_id: int, username: str, private_key: str, passphrase: str = "") -> str:
-    private_key = normalize_private_key_text(private_key)
-    _pkey, key_type = load_private_key_from_text(private_key, passphrase)
-    db = load_server_db()
-    _migrate_if_needed(db, user_id)
-    rec = _ensure_user_record(db, user_id)
-    rec["keychain_default"] = {
-        "auth": "ssh_key",
-        "user": username,
-        "private_key": encrypt_secret(private_key),
-        "passphrase": encrypt_secret(passphrase or ""),
-        "key_type": key_type,
-        "updated_at": int(now_ts()),
-    }
-    save_server_db(db)
-    return key_type
-
-def get_user_keychain_default(user_id: int) -> Optional[Dict[str, Any]]:
+def get_user_keychain_default(user_id: int) -> Optional[Tuple[str, str]]:
     db = load_server_db()
     _migrate_if_needed(db, user_id)
     rec = _ensure_user_record(db, user_id)
@@ -652,24 +474,11 @@ def get_user_keychain_default(user_id: int) -> Optional[Dict[str, Any]]:
     if not isinstance(kc, dict):
         return None
     username = str(kc.get("user", "")).strip()
-    if not username:
+    secret = str(kc.get("secret", ""))
+    if not username or not secret:
         return None
     try:
-        if kc.get("auth") == "ssh_key" or kc.get("private_key"):
-            private_key = decrypt_secret(str(kc.get("private_key", "")))
-            if not private_key:
-                return None
-            return {
-                "auth": "ssh_key",
-                "user": username,
-                "private_key": private_key,
-                "passphrase": decrypt_secret(str(kc.get("passphrase", ""))),
-                "key_type": str(kc.get("key_type", "SSH Key")),
-            }
-        secret = str(kc.get("secret", ""))
-        if secret:
-            return {"auth": "password", "user": username, "password": decrypt_secret(secret), "key_type": "password"}
-        return None
+        return username, decrypt_secret(secret)
     except Exception:
         logger.exception("Could not decrypt default keychain")
         return None
@@ -682,36 +491,13 @@ def set_server_keychain_password(user_id: int, server_id: str, password: str) ->
     info = servers.get(server_id)
     if not isinstance(info, dict):
         return False
-    info["auth"] = "password"
+    info["auth"] = "keychain"
     info["secret"] = encrypt_secret(password)
-    info.pop("private_key", None)
-    info.pop("passphrase", None)
     info["keychain_updated_at"] = int(now_ts())
     servers[server_id] = info
     rec["servers"] = servers
     save_server_db(db)
     return True
-
-def set_server_keychain_key(user_id: int, server_id: str, private_key: str, passphrase: str = "") -> Tuple[bool, str]:
-    private_key = normalize_private_key_text(private_key)
-    _pkey, key_type = load_private_key_from_text(private_key, passphrase)
-    db = load_server_db()
-    _migrate_if_needed(db, user_id)
-    rec = _ensure_user_record(db, user_id)
-    servers = rec.get("servers", {})
-    info = servers.get(server_id)
-    if not isinstance(info, dict):
-        return False, ""
-    info["auth"] = "ssh_key"
-    info["private_key"] = encrypt_secret(private_key)
-    info["passphrase"] = encrypt_secret(passphrase or "")
-    info["key_type"] = key_type
-    info.pop("secret", None)
-    info["keychain_updated_at"] = int(now_ts())
-    servers[server_id] = info
-    rec["servers"] = servers
-    save_server_db(db)
-    return True, key_type
 
 def clear_server_keychain_password(user_id: int, server_id: str) -> bool:
     db = load_server_db()
@@ -723,59 +509,25 @@ def clear_server_keychain_password(user_id: int, server_id: str) -> bool:
         return False
     info["auth"] = "ask"
     info.pop("secret", None)
-    info.pop("private_key", None)
-    info.pop("passphrase", None)
-    info.pop("key_type", None)
     servers[server_id] = info
     rec["servers"] = servers
     save_server_db(db)
     return True
 
 def get_server_keychain_password(info: Dict[str, Any]) -> Optional[str]:
-    cred = get_server_keychain_credential(info)
-    if cred and cred.get("auth") == "password":
-        return str(cred.get("password", ""))
-    return None
-
-def get_server_keychain_credential(info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(info, dict):
         return None
-    try:
-        if info.get("auth") == "ssh_key" or info.get("private_key"):
-            private_key = decrypt_secret(str(info.get("private_key", "")))
-            if not private_key:
-                return None
-            return {
-                "auth": "ssh_key",
-                "user": str(info.get("user", "")).strip(),
-                "private_key": private_key,
-                "passphrase": decrypt_secret(str(info.get("passphrase", ""))),
-                "key_type": str(info.get("key_type", "SSH Key")),
-            }
-        secret = str(info.get("secret", ""))
-        if secret:
-            return {
-                "auth": "password",
-                "user": str(info.get("user", "")).strip(),
-                "password": decrypt_secret(secret),
-                "key_type": "password",
-            }
+    secret = str(info.get("secret", ""))
+    if not secret:
         return None
+    try:
+        return decrypt_secret(secret)
     except Exception:
         logger.exception("Could not decrypt server keychain")
         return None
 
 def server_has_keychain(info: Dict[str, Any]) -> bool:
-    return bool(isinstance(info, dict) and (info.get("secret") or info.get("private_key")))
-
-def credential_label(cred: Optional[Dict[str, Any]]) -> str:
-    if not cred:
-        return "خاموش"
-    if cred.get("auth") == "ssh_key":
-        return f"SSH Key ({cred.get('key_type') or 'key'})"
-    if cred.get("auth") == "password":
-        return "Password"
-    return "فعال"
+    return bool(isinstance(info, dict) and info.get("secret"))
 
 # ================= UI (INLINE BUTTONS) =================
 def keyboard_main(user_id: int) -> InlineKeyboardMarkup:
@@ -813,9 +565,8 @@ def keyboard_server_actions(server_id: str) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🔌 اتصال", callback_data=f"SV:CONNECT:{server_id}"),
              InlineKeyboardButton("⭐ پیش‌فرض", callback_data=f"SV:DEFAULT:{server_id}")],
-            [InlineKeyboardButton("🗝 ذخیره/تغییر SSH Key", callback_data=f"SV:KEYCHAIN:{server_id}"),
-             InlineKeyboardButton("🔑 ذخیره پسورد", callback_data=f"SV:PASSCHAIN:{server_id}")],
-            [InlineKeyboardButton("🧹 حذف Keychain", callback_data=f"SV:KEYCHAIN_CLEAR:{server_id}")],
+            [InlineKeyboardButton("🔑 ذخیره/تغییر Keychain", callback_data=f"SV:KEYCHAIN:{server_id}"),
+             InlineKeyboardButton("🧹 حذف Keychain", callback_data=f"SV:KEYCHAIN_CLEAR:{server_id}")],
             [InlineKeyboardButton("🗑 حذف", callback_data=f"SV:DELETE:{server_id}"),
              InlineKeyboardButton("⬅️ لیست", callback_data="M:SERVERS")],
         ]
@@ -827,8 +578,7 @@ def keyboard_wizard_cancel() -> InlineKeyboardMarkup:
 def keyboard_add_server_auth() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🗝 ذخیره SSH Private Key", callback_data="W:ADD_AUTH:SSHKEY")],
-            [InlineKeyboardButton("🔑 ذخیره پسورد", callback_data="W:ADD_AUTH:PASSCHAIN")],
+            [InlineKeyboardButton("🔑 ذخیره پسورد در Keychain", callback_data="W:ADD_AUTH:KEYCHAIN")],
             [InlineKeyboardButton("🚪 بدون Keychain / هر بار پسورد بپرس", callback_data="W:ADD_AUTH:ASK")],
             [InlineKeyboardButton("❌ لغو", callback_data="W:CANCEL")],
         ]
@@ -859,7 +609,7 @@ class SSHSession:
         self.kb_page = 0
         self.sftp_lock = threading.Lock()
 
-    def start(self, user: str, host: str, port: int, password: str = "", pkey=None, auth_label: str = "password") -> Tuple[bool, Optional[str]]:
+    def start(self, user: str, host: str, port: int, password: str) -> Tuple[bool, Optional[str]]:
         try:
             self.target = f"{user}@{host}:{port}"
             self.client = paramiko.SSHClient()
@@ -870,22 +620,17 @@ class SSHSession:
             else:
                 self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-            connect_kwargs = dict(
-                hostname=host,
+            self.client.connect(
+                host,
                 port=port,
                 username=user,
+                password=password,
                 look_for_keys=False,
                 allow_agent=False,
                 timeout=15,
                 banner_timeout=15,
                 auth_timeout=15,
             )
-            if pkey is not None:
-                connect_kwargs["pkey"] = pkey
-            else:
-                connect_kwargs["password"] = password
-
-            self.client.connect(**connect_kwargs)
 
             try:
                 tr = self.client.get_transport()
@@ -899,7 +644,7 @@ class SSHSession:
 
             msg = self.bot.send_message(
                 self.chat_id,
-                text=html_pre(f"Connecting with {auth_label}..."),
+                text=html_pre("Connecting..."),
                 parse_mode=ParseMode.HTML,
                 reply_markup=self.keyboard(),
                 disable_web_page_preview=True,
@@ -1184,31 +929,11 @@ def clear_upload(key: SessionKey) -> None:
         UPLOADS.pop(key, None)
 
 def start_ssh_session_with_password(ctx: CallbackContext, key: SessionKey, user: str, host: str, port: int, password: str) -> Tuple[bool, Optional[str], Optional[SSHSession]]:
-    cred = {"auth": "password", "user": user, "password": password}
-    return start_ssh_session_with_credential(ctx, key, cred, host, port)
-
-def start_ssh_session_with_credential(ctx: CallbackContext, key: SessionKey, cred: Dict[str, Any], host: str, port: int) -> Tuple[bool, Optional[str], Optional[SSHSession]]:
-    user = str(cred.get("user", "")).strip()
-    if not user:
-        return False, "Username is empty", None
-    password = ""
-    pkey = None
-    auth_label = "password"
-    try:
-        if cred.get("auth") == "ssh_key":
-            pkey, key_type = load_private_key_from_text(str(cred.get("private_key", "")), str(cred.get("passphrase", "")))
-            auth_label = f"SSH Key ({key_type})"
-        else:
-            password = str(cred.get("password", ""))
-            auth_label = "password"
-    except Exception as e:
-        return False, str(e), None
-
     stop_session(key)
     sess = SSHSession(key, ctx.bot)
     with STATE_LOCK:
         SESSIONS[key] = sess
-    ok, err = sess.start(user, host, port, password=password, pkey=pkey, auth_label=auth_label)
+    ok, err = sess.start(user, host, port, password)
     if not ok:
         with STATE_LOCK:
             SESSIONS.pop(key, None)
@@ -1216,7 +941,6 @@ def start_ssh_session_with_credential(ctx: CallbackContext, key: SessionKey, cre
     return True, None, sess
 
 # ================= MODIFIER HELPERS =================
-
 def parse_combo_tokens(tokens: List[str]) -> Tuple[List[str], str]:
     merged: List[str] = []
     for t in tokens:
@@ -1330,10 +1054,7 @@ def wizard_start_keychain_setup(update: Update, ctx: CallbackContext):
         return
     prompt = ctx.bot.send_message(
         chat_id,
-        "🗝 تنظیم SSH Keychain واقعی\n\n"
-        "یوزرنیم SSH را بفرست؛ مثلاً: <code>root</code>\n"
-        "بعد Private Key را می‌پرسم. می‌توانی کلید را مثل Termius کپی‌پیست کنی یا به صورت فایل .pem/.key بفرستی.",
-        parse_mode=ParseMode.HTML,
+        "🔐 یوزرنیم پیش‌فرض SSH را بفرست. بعد از آن پسورد را می‌پرسم و رمزنگاری‌شده ذخیره می‌کنم.",
         reply_markup=keyboard_wizard_cancel(),
     )
     set_wizard(key, WizardState(step="KEYCHAIN_USER", prompt_msg_id=prompt.message_id))
@@ -1342,7 +1063,7 @@ def wizard_ask_quick_host(update: Update, ctx: CallbackContext):
     key = session_key_from_update(update)
     chat_id, user_id = key
     if not get_user_keychain_default(user_id):
-        ctx.bot.send_message(chat_id, "اول /keychain را اجرا کن و SSH Private Key را ذخیره کن.")
+        ctx.bot.send_message(chat_id, "اول Keychain پیش‌فرض را تنظیم کن.")
         wizard_start_keychain_setup(update, ctx)
         return
     prompt = ctx.bot.send_message(
@@ -1366,45 +1087,6 @@ def wizard_ask_upload_dir(update: Update, ctx: CallbackContext):
         reply_markup=keyboard_wizard_cancel(),
     )
     set_wizard(key, WizardState(step="UPLOAD_DIR", prompt_msg_id=prompt.message_id))
-
-def wizard_receive_private_key_text(update: Update, ctx: CallbackContext, private_key_text: str) -> bool:
-    key = session_key_from_update(update)
-    st = get_wizard(key)
-    if not st or st.step not in ("KEYCHAIN_PRIVATE_KEY", "SET_SERVER_PRIVATE_KEY", "ADD_SERVER_PRIVATE_KEY"):
-        return False
-
-    chat_id, user_id = key
-    try:
-        normalized = normalize_private_key_text(private_key_text)
-        key_type, needs_passphrase = probe_private_key_text(normalized)
-    except Exception as e:
-        ctx.bot.send_message(chat_id, f"❌ Private Key معتبر نیست:\n<code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
-        return True
-
-    try:
-        update.effective_message.delete()
-    except Exception:
-        pass
-
-    st.data["private_key"] = normalized
-    st.data["key_type"] = key_type
-    if st.step == "KEYCHAIN_PRIVATE_KEY":
-        st.step = "KEYCHAIN_KEY_PASSPHRASE"
-    elif st.step == "SET_SERVER_PRIVATE_KEY":
-        st.step = "SET_SERVER_KEY_PASSPHRASE"
-    else:
-        st.step = "ADD_SERVER_KEY_PASSPHRASE"
-
-    hint = "این کلید Passphrase دارد؛ Passphrase را بفرست." if needs_passphrase else "اگر کلید Passphrase ندارد، فقط یک نقطه <code>.</code> بفرست."
-    prompt = ctx.bot.send_message(
-        chat_id,
-        f"✅ Private Key دریافت شد ({html.escape(key_type)}).\n{hint}\nپیام Passphrase حذف می‌شود.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard_wizard_cancel(),
-    )
-    st.prompt_msg_id = prompt.message_id
-    set_wizard(key, st)
-    return True
 
 def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
     key = session_key_from_update(update)
@@ -1447,18 +1129,35 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
     if st.step == "AWAIT_PASSWORD":
         pwd = text
         _try_delete()
+
         p = get_pending(key)
         if not p:
             clear_wizard(key)
             ctx.bot.send_message(chat_id, "❌ درخواست اتصال پیدا نشد. دوباره تلاش کن.", parse_mode=ParseMode.HTML)
             return True
-        ok, err, sess = start_ssh_session_with_password(ctx, key, p.user, p.host, p.port, pwd)
+
+        stop_session(key)
+
+        sess = SSHSession(key, ctx.bot)
+        with STATE_LOCK:
+            SESSIONS[key] = sess
+
+        ok, err = sess.start(p.user, p.host, p.port, pwd)
         clear_wizard(key)
+
         if not ok:
+            with STATE_LOCK:
+                SESSIONS.pop(key, None)
             ctx.bot.send_message(chat_id, f"❌ اتصال ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
         else:
-            ctx.bot.send_message(chat_id, f"✅ وصل شدی به <b>{html.escape(sess.target)}</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard_main(user_id))
+            ctx.bot.send_message(
+                chat_id,
+                f"✅ وصل شدی به <b>{html.escape(sess.target)}</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard_main(user_id),
+            )
         return True
+
 
     if st.step == "KEYCHAIN_USER":
         username = text.strip()
@@ -1466,13 +1165,11 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
             ctx.bot.send_message(chat_id, "❌ یوزرنیم خالیه.")
             return True
         _try_delete()
-        st.step = "KEYCHAIN_PRIVATE_KEY"
+        st.step = "KEYCHAIN_PASSWORD"
         st.data["username"] = username
         prompt = ctx.bot.send_message(
             chat_id,
-            f"🗝 حالا Private Key برای <b>{html.escape(username)}</b> را بفرست.\n"
-            "از Termius همان بخش <b>Private key</b> را کامل کپی کن؛ از <code>-----BEGIN</code> تا <code>-----END</code>.\n"
-            "یا کلید را به صورت فایل .pem/.key بفرست.",
+            f"🔐 پسورد SSH برای <b>{html.escape(username)}</b> را بفرست. پیام پسورد حذف می‌شود.",
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard_wizard_cancel(),
         )
@@ -1480,21 +1177,18 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
         set_wizard(key, st)
         return True
 
-    if st.step == "KEYCHAIN_PRIVATE_KEY":
-        return wizard_receive_private_key_text(update, ctx, text)
-
-    if st.step == "KEYCHAIN_KEY_PASSPHRASE":
-        passphrase = normalize_passphrase_text(text)
+    if st.step == "KEYCHAIN_PASSWORD":
+        password = text
         _try_delete()
         username = str(st.data.get("username", "")).strip()
-        private_key = str(st.data.get("private_key", ""))
         try:
-            key_type = set_user_keychain_default_key(user_id, username, private_key, passphrase)
+            set_user_keychain_default(user_id, username, password)
             clear_wizard(key)
-            ctx.bot.send_message(chat_id, f"✅ SSH Keychain ذخیره شد ({html.escape(key_type)}). از این به بعد با /quickssh فقط IP و Port می‌فرستی.", parse_mode=ParseMode.HTML, reply_markup=keyboard_main(user_id))
+            ctx.bot.send_message(chat_id, "✅ Keychain پیش‌فرض ذخیره شد. از این به بعد با «اتصال Keychain» فقط IP و پورت می‌فرستی.", reply_markup=keyboard_main(user_id))
         except Exception as e:
-            logger.exception("Failed to save SSH keychain")
-            ctx.bot.send_message(chat_id, f"❌ ذخیره Keychain ناموفق بود:\n<code>{html.escape(str(e))}</code>\nPassphrase را دوباره بفرست یا لغو کن.", parse_mode=ParseMode.HTML, reply_markup=keyboard_wizard_cancel())
+            logger.exception("Failed to save default keychain")
+            clear_wizard(key)
+            ctx.bot.send_message(chat_id, f"❌ ذخیره Keychain ناموفق بود: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
         return True
 
     if st.step == "QUICK_HOSTPORT":
@@ -1503,13 +1197,14 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
             ctx.bot.send_message(chat_id, "❌ فرمت اشتباهه. مثال: <code>1.2.3.4:22</code>", parse_mode=ParseMode.HTML)
             return True
         _try_delete()
-        cred = get_user_keychain_default(user_id)
-        if not cred:
+        kc = get_user_keychain_default(user_id)
+        if not kc:
             clear_wizard(key)
-            ctx.bot.send_message(chat_id, "❌ Keychain پیش‌فرض پیدا نشد. دوباره /keychain را اجرا کن.")
+            ctx.bot.send_message(chat_id, "❌ Keychain پیش‌فرض پیدا نشد. دوباره تنظیمش کن.")
             return True
+        user, password = kc
         host, port = hp
-        ok, err, sess = start_ssh_session_with_credential(ctx, key, cred, host, port)
+        ok, err, sess = start_ssh_session_with_password(ctx, key, user, host, port, password)
         clear_wizard(key)
         if not ok:
             ctx.bot.send_message(chat_id, f"❌ اتصال Keychain ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
@@ -1524,28 +1219,11 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
         try:
             ok = set_server_keychain_password(user_id, sid, password)
             clear_wizard(key)
-            ctx.bot.send_message(chat_id, "✅ پسورد این سرور ذخیره شد." if ok else "❌ سرور پیدا نشد.", reply_markup=keyboard_servers_list(user_id))
+            ctx.bot.send_message(chat_id, "✅ پسورد این سرور در Keychain ذخیره شد." if ok else "❌ سرور پیدا نشد.", reply_markup=keyboard_servers_list(user_id))
         except Exception as e:
-            logger.exception("Failed to save server password")
+            logger.exception("Failed to save server keychain")
             clear_wizard(key)
             ctx.bot.send_message(chat_id, f"❌ ذخیره ناموفق بود: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
-        return True
-
-    if st.step == "SET_SERVER_PRIVATE_KEY":
-        return wizard_receive_private_key_text(update, ctx, text)
-
-    if st.step == "SET_SERVER_KEY_PASSPHRASE":
-        passphrase = normalize_passphrase_text(text)
-        _try_delete()
-        sid = str(st.data.get("server_id", ""))
-        private_key = str(st.data.get("private_key", ""))
-        try:
-            ok, key_type = set_server_keychain_key(user_id, sid, private_key, passphrase)
-            clear_wizard(key)
-            ctx.bot.send_message(chat_id, f"✅ SSH Key این سرور ذخیره شد ({html.escape(key_type)})." if ok else "❌ سرور پیدا نشد.", parse_mode=ParseMode.HTML, reply_markup=keyboard_servers_list(user_id))
-        except Exception as e:
-            logger.exception("Failed to save server key")
-            ctx.bot.send_message(chat_id, f"❌ ذخیره کلید ناموفق بود:\n<code>{html.escape(str(e))}</code>\nPassphrase را دوباره بفرست یا لغو کن.", parse_mode=ParseMode.HTML, reply_markup=keyboard_wizard_cancel())
         return True
 
     if st.step == "ADD_SERVER_PASSWORD":
@@ -1567,57 +1245,18 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
                 "user": user,
                 "host": host,
                 "port": port,
-                "auth": "password",
+                "auth": "keychain",
                 "secret": encrypt_secret(password),
                 "created_at": int(now_ts()),
                 "last_used": int(now_ts()),
             }
             set_user_servers(user_id, servers)
             clear_wizard(key)
-            ctx.bot.send_message(chat_id, f"✅ سرور <b>{html.escape(name)}</b> با پسورد ذخیره شد.", parse_mode=ParseMode.HTML, reply_markup=keyboard_servers_list(user_id))
+            ctx.bot.send_message(chat_id, f"✅ سرور <b>{html.escape(name)}</b> با Keychain ذخیره شد.", parse_mode=ParseMode.HTML, reply_markup=keyboard_servers_list(user_id))
         except Exception as e:
-            logger.exception("Failed to add server with password")
+            logger.exception("Failed to add server with keychain")
             clear_wizard(key)
             ctx.bot.send_message(chat_id, f"❌ ذخیره ناموفق بود: <code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
-        return True
-
-    if st.step == "ADD_SERVER_PRIVATE_KEY":
-        return wizard_receive_private_key_text(update, ctx, text)
-
-    if st.step == "ADD_SERVER_KEY_PASSPHRASE":
-        passphrase = normalize_passphrase_text(text)
-        _try_delete()
-        name = str(st.data.get("name", "")).strip()
-        user = str(st.data.get("user", "")).strip()
-        host = str(st.data.get("host", "")).strip()
-        port = int(st.data.get("port", 22))
-        sid = str(st.data.get("server_id", ""))
-        private_key = str(st.data.get("private_key", ""))
-        servers = get_user_servers(user_id)
-        if not sid:
-            sid = gen_server_id()
-            while sid in servers:
-                sid = gen_server_id()
-        try:
-            _pkey, key_type = load_private_key_from_text(private_key, passphrase)
-            servers[sid] = {
-                "name": name,
-                "user": user,
-                "host": host,
-                "port": port,
-                "auth": "ssh_key",
-                "private_key": encrypt_secret(private_key),
-                "passphrase": encrypt_secret(passphrase or ""),
-                "key_type": key_type,
-                "created_at": int(now_ts()),
-                "last_used": int(now_ts()),
-            }
-            set_user_servers(user_id, servers)
-            clear_wizard(key)
-            ctx.bot.send_message(chat_id, f"✅ سرور <b>{html.escape(name)}</b> با SSH Keychain ذخیره شد ({html.escape(key_type)}).", parse_mode=ParseMode.HTML, reply_markup=keyboard_servers_list(user_id))
-        except Exception as e:
-            logger.exception("Failed to add server with SSH key")
-            ctx.bot.send_message(chat_id, f"❌ ذخیره کلید ناموفق بود:\n<code>{html.escape(str(e))}</code>\nPassphrase را دوباره بفرست یا لغو کن.", parse_mode=ParseMode.HTML, reply_markup=keyboard_wizard_cancel())
         return True
 
     if st.step == "UPLOAD_DIR":
@@ -1635,6 +1274,7 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
             return True
         name = text.strip()
         _try_delete()
+
         st.step = "ADD_SERVER_TARGET"
         st.data["name"] = name
         prompt = ctx.bot.send_message(
@@ -1656,6 +1296,7 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
             return True
         user, host, port = target
         _try_delete()
+
         servers = get_user_servers(user_id)
         existing = find_server_by_name(user_id, name)
         if existing:
@@ -1664,6 +1305,7 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
             sid = gen_server_id()
             while sid in servers:
                 sid = gen_server_id()
+
         st.step = "ADD_SERVER_AUTH"
         st.data.update({"server_id": sid, "user": user, "host": host, "port": port})
         set_wizard(key, st)
@@ -1679,7 +1321,6 @@ def wizard_process_text(update: Update, ctx: CallbackContext) -> bool:
     return False
 
 # ================= COMMANDS =================
-
 def start_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
@@ -1715,11 +1356,9 @@ def help_cmd(update: Update, ctx: CallbackContext):
         " /ssh user@host[:port]\n"
         " /pass <password>  (پیام حذف میشه)\n"
         " /stop\n\n"
-        "SSH Keychain واقعی:\n"
-        " /keychain  ذخیره یوزرنیم + SSH Private Key مثل Termius\n"
-        " /quickssh host[:port]  اتصال فقط با IP و Port\n"
-        " /serverkey <name>  ذخیره Private Key برای یک سرور ذخیره‌شده\n"
-        " /serverpass <name>  ذخیره پسورد برای یک سرور، اگر خواستی\n\n"
+        "Keychain:\n"
+        " /keychain  ذخیره یوزرنیم/پسورد پیش‌فرض\n"
+        " /quickssh host[:port]  اتصال فقط با IP و Port\n\n"
         "آپلود چند فایل:\n"
         " /upload [remote_dir]\n"
         " چند فایل را از تلگرام بفرست\n"
@@ -1828,30 +1467,6 @@ def serverpass_cmd(update: Update, ctx: CallbackContext):
     )
     set_wizard(key, WizardState(step="SET_SERVER_PASSWORD", data={"server_id": sid}, prompt_msg_id=prompt.message_id))
 
-def serverkey_cmd(update: Update, ctx: CallbackContext):
-    if not guard(update):
-        return
-    user_id = update.effective_user.id
-    key = session_key_from_update(update)
-    if not keychain_available():
-        update.message.reply_text("❌ Keychain فعال نیست یا cryptography نصب نیست.")
-        return
-    if not ctx.args:
-        update.message.reply_text("Usage: /serverkey <server name>")
-        return
-    name = " ".join(ctx.args).strip()
-    found = find_server_by_name(user_id, name)
-    if not found:
-        update.message.reply_text("❌ سرور پیدا نشد.")
-        return
-    sid, info = found
-    prompt = update.message.reply_text(
-        f"🗝 Private Key برای <b>{html.escape(str(info.get('name', name)))}</b> را بفرست؛ از BEGIN تا END یا فایل .pem/.key.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard_wizard_cancel(),
-    )
-    set_wizard(key, WizardState(step="SET_SERVER_PRIVATE_KEY", data={"server_id": sid}, prompt_msg_id=prompt.message_id))
-
 def keychain_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
@@ -1869,12 +1484,13 @@ def quickssh_cmd(update: Update, ctx: CallbackContext):
     if not hp:
         update.message.reply_text("Usage: /quickssh host[:port]")
         return
-    cred = get_user_keychain_default(user_id)
-    if not cred:
-        update.message.reply_text("اول /keychain را اجرا کن تا SSH Private Key پیش‌فرض ذخیره شود.")
+    kc = get_user_keychain_default(user_id)
+    if not kc:
+        update.message.reply_text("اول /keychain را اجرا کن تا یوزرنیم و پسورد پیش‌فرض ذخیره شود.")
         return
+    user, password = kc
     host, port = hp
-    ok, err, sess = start_ssh_session_with_credential(ctx, key, cred, host, port)
+    ok, err, sess = start_ssh_session_with_password(ctx, key, user, host, port, password)
     if not ok:
         update.message.reply_text(f"❌ اتصال Keychain ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
     else:
@@ -1969,44 +1585,11 @@ def stop_cmd(update: Update, ctx: CallbackContext):
     update.message.reply_text("✅ قطع شد." if stopped else "سشن فعالی نیست.")
 
 
-def _download_document_as_text(update: Update, ctx: CallbackContext, max_bytes: int = 256_000) -> str:
-    msg = update.message
-    if not msg or not msg.document:
-        raise RuntimeError("کلید را به صورت Document متنی بفرست، نه عکس.")
-    size = msg.document.file_size or 0
-    if size and size > max_bytes:
-        raise RuntimeError("فایل کلید بیش از حد بزرگ است.")
-    fd, tmp = tempfile.mkstemp(prefix="sshbot_key_", suffix=".txt")
-    os.close(fd)
-    try:
-        tg_file = msg.document.get_file()
-        tg_file.download(custom_path=tmp)
-        with open(tmp, "rb") as f:
-            data = f.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            raise RuntimeError("فایل کلید بیش از حد بزرگ است.")
-        return data.decode("utf-8", errors="replace")
-    finally:
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-
 def document_msg(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
     key = session_key_from_update(update)
     chat_id, user_id = key
-
-    st = get_wizard(key)
-    if st and st.step in ("KEYCHAIN_PRIVATE_KEY", "SET_SERVER_PRIVATE_KEY", "ADD_SERVER_PRIVATE_KEY"):
-        try:
-            private_key_text = _download_document_as_text(update, ctx)
-            wizard_receive_private_key_text(update, ctx, private_key_text)
-        except Exception as e:
-            update.message.reply_text(f"❌ خواندن فایل کلید ناموفق بود:\n<code>{html.escape(str(e))}</code>", parse_mode=ParseMode.HTML)
-        return
-
     s = get_session(key)
     if not s:
         update.message.reply_text("اول به سرور وصل شو، بعد /upload را بزن و فایل بفرست.")
@@ -2150,7 +1733,7 @@ def cb(update: Update, ctx: CallbackContext):
         ctx.bot.send_message(chat_id, f"✅ سرور <b>{html.escape(name)}</b> ذخیره شد. موقع اتصال پسورد می‌پرسم.", parse_mode=ParseMode.HTML, reply_markup=keyboard_servers_list(user_id))
         return
 
-    if data in ("W:ADD_AUTH:PASSCHAIN", "W:ADD_AUTH:KEYCHAIN"):
+    if data == "W:ADD_AUTH:KEYCHAIN":
         st = get_wizard(key)
         if not st or st.step != "ADD_SERVER_AUTH":
             q.answer("درخواست پیدا نشد", show_alert=True)
@@ -2159,28 +1742,9 @@ def cb(update: Update, ctx: CallbackContext):
             q.answer("Keychain فعال نیست", show_alert=True)
             return
         st.step = "ADD_SERVER_PASSWORD"
+        set_wizard(key, st)
         q.answer()
         prompt = ctx.bot.send_message(chat_id, "🔑 پسورد SSH این سرور را بفرست. پیام حذف و رمزنگاری می‌شود.", reply_markup=keyboard_wizard_cancel())
-        st.prompt_msg_id = prompt.message_id
-        set_wizard(key, st)
-        return
-
-    if data == "W:ADD_AUTH:SSHKEY":
-        st = get_wizard(key)
-        if not st or st.step != "ADD_SERVER_AUTH":
-            q.answer("درخواست پیدا نشد", show_alert=True)
-            return
-        if not keychain_available():
-            q.answer("Keychain فعال نیست", show_alert=True)
-            return
-        st.step = "ADD_SERVER_PRIVATE_KEY"
-        q.answer()
-        prompt = ctx.bot.send_message(
-            chat_id,
-            "🗝 Private Key این سرور را بفرست؛ از <code>-----BEGIN</code> تا <code>-----END</code> یا فایل .pem/.key.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard_wizard_cancel(),
-        )
         st.prompt_msg_id = prompt.message_id
         set_wizard(key, st)
         return
@@ -2265,7 +1829,7 @@ def cb(update: Update, ctx: CallbackContext):
         port = int(info.get("port", 22))
         default_id = get_user_default_server_id(user_id)
         star = "⭐ " if sid == default_id else ""
-        auth_txt = "🔑 Keychain: " + credential_label(get_server_keychain_credential(info))
+        auth_txt = "🔑 Keychain: فعال" if server_has_keychain(info) else "🔑 Keychain: خاموش"
         text = f"{star}<b>{html.escape(name)}</b>\n<code>{html.escape(user)}@{html.escape(host)}:{port}</code>\n{auth_txt}"
         q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard_server_actions(sid))
         q.answer()
@@ -2281,20 +1845,26 @@ def cb(update: Update, ctx: CallbackContext):
         info["last_used"] = int(now_ts())
         servers[sid] = info
         set_user_servers(user_id, servers)
+
         user = str(info.get("user", ""))
         host = str(info.get("host", ""))
         port = int(info.get("port", 22))
-        cred = get_server_keychain_credential(info)
-        if cred:
-            cred["user"] = user or cred.get("user", "")
+        saved_pwd = get_server_keychain_password(info) if server_has_keychain(info) else None
+        if saved_pwd:
             q.answer("اتصال با Keychain…")
-            ok, err, sess = start_ssh_session_with_credential(ctx, key, cred, host, port)
+            ok, err, sess = start_ssh_session_with_password(ctx, key, user, host, port, saved_pwd)
             if not ok:
                 ctx.bot.send_message(chat_id, f"❌ اتصال Keychain ناموفق:\n<code>{html.escape(str(err))}</code>", parse_mode=ParseMode.HTML)
             else:
                 ctx.bot.send_message(chat_id, f"✅ وصل شدی به <b>{html.escape(sess.target)}</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard_main(user_id))
             return
-        set_pending(key, PendingConn(user=user, host=host, port=port, server_id=sid))
+
+        set_pending(key, PendingConn(
+            user=user,
+            host=host,
+            port=port,
+            server_id=sid
+        ))
         q.answer("پسورد رو بفرست…")
         wizard_ask_password(ctx, key)
         return
@@ -2311,26 +1881,6 @@ def cb(update: Update, ctx: CallbackContext):
 
     if data.startswith("SV:KEYCHAIN:"):
         sid = data.split("SV:KEYCHAIN:", 1)[1]
-        servers = get_user_servers(user_id)
-        info = servers.get(sid)
-        if not isinstance(info, dict):
-            q.answer("پیدا نشد", show_alert=True)
-            return
-        if not keychain_available():
-            q.answer("Keychain فعال نیست", show_alert=True)
-            return
-        q.answer()
-        prompt = ctx.bot.send_message(
-            chat_id,
-            f"🗝 Private Key برای <b>{html.escape(str(info.get('name', sid)))}</b> را بفرست؛ از BEGIN تا END یا فایل .pem/.key.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard_wizard_cancel(),
-        )
-        set_wizard(key, WizardState(step="SET_SERVER_PRIVATE_KEY", data={"server_id": sid}, prompt_msg_id=prompt.message_id))
-        return
-
-    if data.startswith("SV:PASSCHAIN:"):
-        sid = data.split("SV:PASSCHAIN:", 1)[1]
         servers = get_user_servers(user_id)
         info = servers.get(sid)
         if not isinstance(info, dict):
@@ -2447,7 +1997,6 @@ def cb(update: Update, ctx: CallbackContext):
     q.answer()
 
 # modifier commands (kept)
-
 def process_modifier_command(primary_mod: str, update: Update, ctx: CallbackContext):
     key = session_key_from_update(update)
     chat_id, user_id = key
@@ -2541,7 +2090,6 @@ def main():
     dp.add_handler(CommandHandler("addserver", addserver_cmd))
     dp.add_handler(CommandHandler("delserver", delserver_cmd))
     dp.add_handler(CommandHandler("serverpass", serverpass_cmd))
-    dp.add_handler(CommandHandler("serverkey", serverkey_cmd))
 
     dp.add_handler(CommandHandler("keychain", keychain_cmd))
     dp.add_handler(CommandHandler("quickssh", quickssh_cmd))
@@ -2567,67 +2115,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-PYBOT_EMBEDDED_SOURCE
-chmod 750 "$INSTALL_DIR/ssh-bot.py"
-chown "$APP_USER:$APP_USER" "$INSTALL_DIR/ssh-bot.py"
-
-say "🧪 Testing Python imports..."
-runuser -u "$APP_USER" -- "$INSTALL_DIR/venv/bin/python" -m py_compile "$INSTALL_DIR/ssh-bot.py"
-runuser -u "$APP_USER" -- "$INSTALL_DIR/venv/bin/python" -c "import pkg_resources, telegram.ext, paramiko, cryptography, pyte; print('imports ok')"
-
-say "🧾 Writing env file..."
-umask 077
-{
-  printf 'BOT_TOKEN=%q\n' "$BOT_TOKEN"
-  printf 'INSTALL_DIR=%q\n' "$INSTALL_DIR"
-  printf 'DATA_DIR=%q\n' "$DATA_DIR"
-  printf 'SERVER_DB=%q\n' "$DATA_DIR/servers.json"
-  printf 'KEYCHAIN_ENABLED=1\n'
-  printf 'KEYCHAIN_KEY_FILE=%q\n' "$DATA_DIR/keychain.key"
-  printf 'UPLOAD_TMP_DIR=%q\n' "$DATA_DIR/uploads"
-  printf 'LOG_DIR=%q\n' "$LOG_DIR"
-  printf 'LOG_FILE=%q\n' "$LOG_DIR/ssh-bot.log"
-} > "$ENV_FILE"
-chmod 600 "$ENV_FILE"
-
-say "⚙️  Creating systemd service..."
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF_SERVICE
-[Unit]
-Description=Telegram SSH Bot (SSHBot v4)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$APP_USER
-Group=$APP_USER
-WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$ENV_FILE
-ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/ssh-bot.py
-Restart=always
-RestartSec=5
-KillSignal=SIGINT
-TimeoutStopSec=20
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF_SERVICE
-
-say "🚀 Starting bot service..."
-systemctl daemon-reload
-systemctl enable "$SERVICE_NAME" >/dev/null
-systemctl restart "$SERVICE_NAME"
-sleep 2
-
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-  say "✅ SSHBot v4 installed and running."
-  say "Check version in Telegram with: /version"
-  say "Logs: journalctl -u $SERVICE_NAME -n 80 --no-pager"
-else
-  say "❌ SSHBot failed to start"
-  say "Check logs with: journalctl -u $SERVICE_NAME -n 80 --no-pager"
-  exit 1
-fi
