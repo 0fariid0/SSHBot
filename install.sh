@@ -19,7 +19,7 @@ fi
 clear
 echo -e "${CYAN}${BOLD}"
 echo "========================================="
-echo "        SSHBot Installer (Pro - Fixed)"
+echo "        SSHBot Installer (Pro - Keychain + Upload)"
 echo "========================================="
 echo -e "${RESET}"
 
@@ -78,6 +78,7 @@ sudo -u "${BOT_USER}" -H "${VENV_DIR}/bin/pip" install \
   "urllib3<2" \
   certifi \
   paramiko \
+  cryptography \
   pyte >/dev/null 2>&1
 
 # ================= DEPLOY BOT FILE =================
@@ -115,7 +116,18 @@ DATA_DIR=${DATA_DIR}
 SERVER_DB=${DATA_DIR}/servers.json
 LOG_DIR=${LOG_DIR}
 LOG_FILE=${LOG_DIR}/ssh-bot.log
-REPO_URL=https://github.com/ItzGlace/SSHBot
+REPO_URL=https://github.com/0fariid0/SSHBot
+
+# Keychain: encrypted local password store for quick SSH login
+KEYCHAIN_ENABLED=1
+KEYCHAIN_KEY_FILE=${DATA_DIR}/keychain.key
+
+# Uploads: temporary local downloads before SFTP upload to the server
+UPLOAD_TMP_DIR=${DATA_DIR}/uploads
+UPLOAD_CREATE_DIR=1
+UPLOAD_OVERWRITE=1
+MAX_UPLOAD_BYTES=0
+DELETE_UPLOADED_TG_MESSAGE=0
 
 # Terminal rendering:
 TERM_COLS=120
