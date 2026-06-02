@@ -104,16 +104,33 @@ else
 fi
 
 echo -e "${BLUE}📦 Installing Python packages (as ${BOT_USER})...${RESET}"
-run_as_bot "${VENV_DIR}/bin/pip" install -U pip wheel setuptools >/dev/null 2>&1
+# Python 3.12 no longer includes setuptools/pkg_resources in venv by default.
+# python-telegram-bot 13.x imports APScheduler, and APScheduler 3.x still needs pkg_resources.
+run_as_bot "${VENV_DIR}/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+run_as_bot "${VENV_DIR}/bin/python" -m pip install -U --force-reinstall pip wheel "setuptools<81" >/dev/null
 
-# IMPORTANT: urllib3<2 is required for python-telegram-bot 13.x compatibility
-run_as_bot "${VENV_DIR}/bin/pip" install \
+# IMPORTANT: urllib3<2 is required for python-telegram-bot 13.x compatibility.
+# APScheduler/tzlocal are pinned to versions known to work with python-telegram-bot 13.15.
+run_as_bot "${VENV_DIR}/bin/python" -m pip install -U \
+  "setuptools<81" \
   "python-telegram-bot==13.15" \
+  "APScheduler==3.6.3" \
+  "tzlocal<3" \
   "urllib3<2" \
   certifi \
   paramiko \
   cryptography \
-  pyte >/dev/null 2>&1
+  pyte >/dev/null
+
+# Fail early with a clear error if the old Telegram stack cannot import.
+run_as_bot "${VENV_DIR}/bin/python" - <<'PY'
+import pkg_resources
+import telegram
+import telegram.ext
+import paramiko
+import cryptography
+import pyte
+PY
 
 # ================= DEPLOY BOT FILE =================
 echo -e "${BLUE}⬇️  Deploying SSHBot...${RESET}"

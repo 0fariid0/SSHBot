@@ -1,30 +1,26 @@
-sudo systemctl stop sshbot
+Emergency fix for: ModuleNotFoundError: No module named 'pkg_resources'
 
-# مطمئن شو پوشه‌ها دست sshbot باشن
-sudo chown -R sshbot:sshbot /opt/sshbot /var/log/ssh-bot 2>/dev/null || true
+Cause:
+Python 3.12 virtualenvs do not always include setuptools/pkg_resources by default.
+python-telegram-bot==13.15 imports APScheduler 3.x, and APScheduler needs pkg_resources.
 
-# venv خراب رو پاک کن و از نو بساز
-sudo rm -rf /opt/sshbot/venv
-sudo -u sshbot -H python3 -m venv /opt/sshbot/venv
+Run this on the server as root:
 
-# ابزارهای پایه
-sudo -u sshbot -H /opt/sshbot/venv/bin/pip install -U pip wheel setuptools
-
-# دیپندنسی‌ها (urllib3<2 خیلی مهمه)
-sudo -u sshbot -H /opt/sshbot/venv/bin/pip install \
-  "python-telegram-bot==13.15" \
-  "urllib3<2" \
-  certifi \
-  paramiko \
-  cryptography \
-  pyte
-
-# تست ایمپورت
-sudo -u sshbot -H /opt/sshbot/venv/bin/python -c "import urllib3, telegram; print('IMPORT OK')"
-
-# راه‌اندازی دوباره
-sudo systemctl restart sshbot
-sudo systemctl status sshbot --no-pager
-
-# اگر خواستی لاگ رو ببینی
+systemctl stop sshbot || true
+runuser -u sshbot -- /opt/sshbot/venv/bin/python -m ensurepip --upgrade || true
+runuser -u sshbot -- /opt/sshbot/venv/bin/python -m pip install -U --force-reinstall pip wheel "setuptools<81"
+runuser -u sshbot -- /opt/sshbot/venv/bin/python -m pip install -U "setuptools<81" "APScheduler==3.6.3" "tzlocal<3" "urllib3<2" "python-telegram-bot==13.15" certifi paramiko cryptography pyte
+runuser -u sshbot -- /opt/sshbot/venv/bin/python - <<'PY'
+import pkg_resources
+import telegram.ext
+import paramiko
+import cryptography
+import pyte
+print('imports ok')
+PY
+systemctl restart sshbot
+systemctl status sshbot --no-pager
 journalctl -u sshbot -n 80 --no-pager
+
+Installer change:
+The install.sh in this ZIP has been updated to install/pin setuptools<81 and APScheduler==3.6.3, then test imports before starting the service.
