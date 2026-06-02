@@ -1,124 +1,48 @@
-# SSHBot Pro
+# SSHBot
 
-ربات تلگرام برای اتصال تعاملی SSH به سرور، با ترمینال زنده، کلیدهای کنترلی، مدیریت چند سرور، Keychain داخلی و آپلود چند فایل روی سرور.
+Easily access your servers using **SSH over a Telegram Bot**.  
+Written in **Python**, designed for fast, interactive, and secure remote server access.
 
-## امکانات جدید این نسخه
+---
 
-- اتصال SSH تعاملی داخل تلگرام
-- مدیریت چند سرور با دکمه‌های شیشه‌ای
-- Keychain داخلی و رمزنگاری‌شده برای ذخیره پسورد SSH
-- اتصال سریع با Keychain: فقط IP/Host و Port را می‌فرستی
-- آپلود چند فایل از تلگرام به سرور از طریق SFTP
-- پشتیبانی از انتخاب همزمان چند فایل در تلگرام؛ هر فایل جداگانه آپلود می‌شود
-- ذخیره/حذف Keychain برای هر سرور ذخیره‌شده
-- حذف پیام‌های حساس مثل پسورد تا جای ممکن
-- میانبرهای Ctrl/Alt/Shift و دکمه‌های کاربردی ترمینال
+## 🚀 What is SSHBot?
 
-## نصب
+**SSHBot** allows you to open and control SSH sessions directly from Telegram.  
+No terminal, no VPN hopping — just your Telegram app.
 
-روی سرور لینوکسی اجرا کن:
+It supports interactive shells, keyboard shortcuts, and command combinations, making it suitable for real server administration.
+
+---
+
+## ✨ Features
+
+- 🔐 SSH access over Telegram
+- ⌨️ Interactive terminal rendering
+- 🧠 Keyboard combinations via commands:
+  - `/ctrl c` → Ctrl + C
+  - `/alt a` → Alt + A
+  - `/shift x` → Shift + X
+  - `/ctrl alt c` → Ctrl + Alt + C
+- 🛑 Stop SSH sessions instantly
+- 🧹 Automatically removes sensitive messages (like passwords)
+- 🌍 English & Persian friendly
+- ⚙️ Runs as a systemd service
+- 🐧 Optimized for Linux servers
+
+---
+
+## 🤖 Sample Bot
+
+Try the demo bot here:  
+👉 **https://t.me/ssh4ccess_bot**
+
+> ⚠️ This is a demo bot. Sessions may be limited or reset at any time.
+
+---
+
+## 📥 Installation (One-Line)
+
+Run this command on your server:
 
 ```bash
-sudo bash install.sh
-```
-
-یا فایل‌ها را در `/opt/sshbot` کپی کن و سرویس را با همین `install.sh` بساز.
-
-بعد از نصب، برای امنیت حتماً در فایل زیر آیدی تلگرام خودت را در `ALLOWED_USERS` بگذار:
-
-```bash
-sudo nano /etc/sshbot.env
-sudo systemctl restart sshbot
-```
-
-## استفاده سریع
-
-### اتصال معمولی
-
-- `/start`
-- دکمه «اتصال»
-- ارسال `user@host` یا `user@host:port`
-- ارسال پسورد
-
-### Keychain پیش‌فرض
-
-برای اینکه فقط IP و Port بدهی و پسورد نخواهد:
-
-1. دکمه «تنظیم Keychain» یا دستور `/keychain`
-2. یوزرنیم SSH را بفرست، مثلاً `root`
-3. پسورد را بفرست؛ پسورد رمزنگاری‌شده ذخیره می‌شود
-4. دکمه «اتصال Keychain» یا دستور زیر را بزن:
-
-```text
-/quickssh 1.2.3.4:22
-```
-
-### Keychain برای سرور ذخیره‌شده
-
-- از «افزودن سرور» استفاده کن و گزینه «ذخیره پسورد در Keychain» را انتخاب کن
-- یا برای سرور قبلی:
-
-```text
-/serverpass NAME
-```
-
-بعد از ذخیره، با دکمه اتصال همان سرور دیگر پسورد نمی‌خواهد.
-
-### آپلود چند فایل روی سرور
-
-اول به سرور وصل شو، بعد:
-
-```text
-/upload /root/uploads
-```
-
-حالا در تلگرام چند فایل را با هم انتخاب و ارسال کن. ربات هر فایل را با SFTP روی همان مسیر آپلود می‌کند.
-
-برای پایان حالت آپلود:
-
-```text
-/done
-```
-
-مسیر پیش‌فرض اگر چیزی ندهی `.` است، یعنی home/current SFTP کاربر SSH.
-
-## تنظیمات مهم در `/etc/sshbot.env`
-
-```env
-KEYCHAIN_ENABLED=1
-KEYCHAIN_KEY_FILE=/opt/sshbot/data/keychain.key
-UPLOAD_TMP_DIR=/opt/sshbot/data/uploads
-UPLOAD_CREATE_DIR=1
-UPLOAD_OVERWRITE=1
-MAX_UPLOAD_BYTES=0
-DELETE_UPLOADED_TG_MESSAGE=0
-PRIVATE_ONLY=1
-ALLOWED_USERS=
-```
-
-نکته امنیتی: فایل `keychain.key` کلید رمزگشایی Keychain است. از آن بکاپ امن بگیر و اجازه دسترسی‌اش را محدود نگه دار.
-
-## دستورهای اصلی
-
-```text
-/start
-/menu
-/help
-/id
-/status
-/ssh user@host[:port]
-/pass password
-/stop
-/servers
-/addserver name user@host[:port]
-/delserver name
-/serverpass name
-/keychain
-/quickssh host[:port]
-/upload [remote_dir]
-/done
-/ctrl c
-/alt a
-/shift x
-/keys ctrl+alt+c
-```
+curl -fsSL https://github.com/0fariid0/SSHBot/raw/refs/heads/main/install.sh | sudo bash
