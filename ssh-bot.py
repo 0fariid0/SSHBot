@@ -14,6 +14,8 @@ import posixpath
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, List, Optional, Any
 
+BOT_VERSION = "SSHBot Pro v3.0.0 - Keychain + Multi Upload"
+
 import paramiko
 import pyte
 
@@ -1323,7 +1325,7 @@ def start_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
     text = (
-        "SSHBot آماده است ✅\n\n"
+        f"SSHBot آماده است ✅\nنسخه: <code>{BOT_VERSION}</code>\n\n"
         "از دکمه‌ها استفاده کن یا دستورها رو تایپ کن.\n"
 
     )
@@ -1346,21 +1348,34 @@ def help_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
         return
     text = (
-        "HELP / راهنما\n\n"
+        f"HELP / راهنما\nنسخه: {BOT_VERSION}\n\n"
         "✅ حالت دکمه‌ای: /start یا /menu\n"
-        "🆔 گرفتن آی‌دی: /id\n\n"
-        "Legacy commands:\n"
+        "🆔 گرفتن آی‌دی: /id\n"
+        "🔎 نسخه نصب‌شده: /version\n\n"
+        "اتصال معمولی:\n"
         " /ssh user@host[:port]\n"
         " /pass <password>  (پیام حذف میشه)\n"
         " /stop\n\n"
-        "Multi-server:\n"
+        "Keychain:\n"
+        " /keychain  ذخیره یوزرنیم/پسورد پیش‌فرض\n"
+        " /quickssh host[:port]  اتصال فقط با IP و Port\n\n"
+        "آپلود چند فایل:\n"
+        " /upload [remote_dir]\n"
+        " چند فایل را از تلگرام بفرست\n"
+        " /done\n\n"
+        "مدیریت سرورها:\n"
         " /servers\n"
         " /addserver <name> user@host[:port]\n"
         " /delserver <name>\n\n"
-        "Key combos:\n"
+        "کلیدها:\n"
         " /ctrl c   /alt a   /keys ctrl+alt+c\n"
     )
     update.message.reply_text(text)
+
+def version_cmd(update: Update, ctx: CallbackContext):
+    if not guard(update):
+        return
+    update.message.reply_text(f"✅ نسخه نصب‌شده:\n{BOT_VERSION}")
 
 def servers_cmd(update: Update, ctx: CallbackContext):
     if not guard(update):
@@ -2069,6 +2084,7 @@ def main():
     dp.add_handler(CommandHandler("help", help_cmd))
     dp.add_handler(CommandHandler("id", id_cmd))
     dp.add_handler(CommandHandler("status", status_cmd))
+    dp.add_handler(CommandHandler("version", version_cmd))
 
     dp.add_handler(CommandHandler("servers", servers_cmd))
     dp.add_handler(CommandHandler("addserver", addserver_cmd))
@@ -2093,7 +2109,7 @@ def main():
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, text_msg))
     dp.add_handler(CallbackQueryHandler(cb))
 
-    logger.info("SSH bot started")
+    logger.info("SSH bot started: %s", BOT_VERSION)
     up.start_polling()
     up.idle()
 

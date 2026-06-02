@@ -1,124 +1,48 @@
-# SSHBot Pro
+# SSHBot Pro v3
 
-ربات تلگرام برای اتصال تعاملی SSH به سرور، با ترمینال زنده، کلیدهای کنترلی، مدیریت چند سرور، Keychain داخلی و آپلود چند فایل روی سرور.
+این نسخه داخل `install.sh` خود فایل اصلی ربات را هم دارد؛ بنابراین اگر روی GitHub فقط `install.sh` را جایگزین کنید، نسخه Pro واقعاً deploy می‌شود و دیگر به `ssh-bot.py` قدیمی ریپو وابسته نیست.
 
-## امکانات جدید این نسخه
+## نصب از GitHub
 
-- اتصال SSH تعاملی داخل تلگرام
-- مدیریت چند سرور با دکمه‌های شیشه‌ای
-- Keychain داخلی و رمزنگاری‌شده برای ذخیره پسورد SSH
-- اتصال سریع با Keychain: فقط IP/Host و Port را می‌فرستی
-- آپلود چند فایل از تلگرام به سرور از طریق SFTP
-- پشتیبانی از انتخاب همزمان چند فایل در تلگرام؛ هر فایل جداگانه آپلود می‌شود
-- ذخیره/حذف Keychain برای هر سرور ذخیره‌شده
-- حذف پیام‌های حساس مثل پسورد تا جای ممکن
-- میانبرهای Ctrl/Alt/Shift و دکمه‌های کاربردی ترمینال
-
-## نصب
-
-روی سرور لینوکسی اجرا کن:
+1. فایل `install.sh` همین نسخه را در ریپوی خودتان جایگزین کنید.
+2. اجرا کنید:
 
 ```bash
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/0fariid0/SSHBot/main/install.sh | sudo bash
 ```
 
-یا فایل‌ها را در `/opt/sshbot` کپی کن و سرویس را با همین `install.sh` بساز.
-
-بعد از نصب، برای امنیت حتماً در فایل زیر آیدی تلگرام خودت را در `ALLOWED_USERS` بگذار:
+یا با توکن مستقیم:
 
 ```bash
-sudo nano /etc/sshbot.env
-sudo systemctl restart sshbot
+curl -fsSL https://raw.githubusercontent.com/0fariid0/SSHBot/main/install.sh | sudo BOT_TOKEN='YOUR_BOT_TOKEN' bash
 ```
 
-## استفاده سریع
+## بررسی نصب درست
 
-### اتصال معمولی
+روی سرور:
 
-- `/start`
-- دکمه «اتصال»
-- ارسال `user@host` یا `user@host:port`
-- ارسال پسورد
+```bash
+grep BOT_VERSION /opt/sshbot/ssh-bot.py
+systemctl status sshbot --no-pager
+journalctl -u sshbot -n 80 --no-pager
+```
 
-### Keychain پیش‌فرض
-
-برای اینکه فقط IP و Port بدهی و پسورد نخواهد:
-
-1. دکمه «تنظیم Keychain» یا دستور `/keychain`
-2. یوزرنیم SSH را بفرست، مثلاً `root`
-3. پسورد را بفرست؛ پسورد رمزنگاری‌شده ذخیره می‌شود
-4. دکمه «اتصال Keychain» یا دستور زیر را بزن:
+داخل تلگرام:
 
 ```text
-/quickssh 1.2.3.4:22
+/version
 ```
 
-### Keychain برای سرور ذخیره‌شده
-
-- از «افزودن سرور» استفاده کن و گزینه «ذخیره پسورد در Keychain» را انتخاب کن
-- یا برای سرور قبلی:
+باید این را نشان دهد:
 
 ```text
-/serverpass NAME
+SSHBot Pro v3.0.0 - Keychain + Multi Upload
 ```
 
-بعد از ذخیره، با دکمه اتصال همان سرور دیگر پسورد نمی‌خواهد.
+## امکانات جدید
 
-### آپلود چند فایل روی سرور
-
-اول به سرور وصل شو، بعد:
-
-```text
-/upload /root/uploads
-```
-
-حالا در تلگرام چند فایل را با هم انتخاب و ارسال کن. ربات هر فایل را با SFTP روی همان مسیر آپلود می‌کند.
-
-برای پایان حالت آپلود:
-
-```text
-/done
-```
-
-مسیر پیش‌فرض اگر چیزی ندهی `.` است، یعنی home/current SFTP کاربر SSH.
-
-## تنظیمات مهم در `/etc/sshbot.env`
-
-```env
-KEYCHAIN_ENABLED=1
-KEYCHAIN_KEY_FILE=/opt/sshbot/data/keychain.key
-UPLOAD_TMP_DIR=/opt/sshbot/data/uploads
-UPLOAD_CREATE_DIR=1
-UPLOAD_OVERWRITE=1
-MAX_UPLOAD_BYTES=0
-DELETE_UPLOADED_TG_MESSAGE=0
-PRIVATE_ONLY=1
-ALLOWED_USERS=
-```
-
-نکته امنیتی: فایل `keychain.key` کلید رمزگشایی Keychain است. از آن بکاپ امن بگیر و اجازه دسترسی‌اش را محدود نگه دار.
-
-## دستورهای اصلی
-
-```text
-/start
-/menu
-/help
-/id
-/status
-/ssh user@host[:port]
-/pass password
-/stop
-/servers
-/addserver name user@host[:port]
-/delserver name
-/serverpass name
-/keychain
-/quickssh host[:port]
-/upload [remote_dir]
-/done
-/ctrl c
-/alt a
-/shift x
-/keys ctrl+alt+c
-```
+- `/keychain` ذخیره یوزرنیم/پسورد پیش‌فرض
+- `/quickssh host[:port]` اتصال فقط با IP و پورت
+- `/upload [remote_dir]` آپلود چند فایل روی سرور فعال
+- `/done` پایان حالت آپلود
+- `/version` نمایش نسخه نصب‌شده
