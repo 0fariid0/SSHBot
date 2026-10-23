@@ -1,0 +1,8 @@
+fastapi==0.161.0
+uvicorn==0.54.0
+asyncssh==2.24.1
+cryptography==50.0.2
+httpx==0.28.1
+python-multipart==0.0.32
+websockets==15.0.1
+bcrypt==5.0.0

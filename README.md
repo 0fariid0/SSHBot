@@ -1,34 +1,46 @@
-# SSHBot Pro v5 - Bottom Terminal Fix
+# SSHBot Web v6
 
-Version: SSHBot Pro v5.0.0 - Real Keychain + Bottom Terminal Fix
+بازطراحی مستقل ربات SSH به Mini App تلگرام با ظاهر تیره، الهام‌گرفته از الگوی کاری Termius. این برنامه محصول یا نسخه رسمی Termius نیست.
 
-Fixes:
-- After successful SSH/Keychain connection, the bot no longer sends a separate success/menu message below the terminal.
-- The terminal message stays as the latest message after connection.
-- When showing upload/status/server helper messages during an active session, the terminal is recreated below them so it returns to the bottom.
-- Keeps Real SSH Keychain support and multi-file upload.
+**از `INSTALL-FA.md` شروع کنید.** بسته باید کامل استخراج شود؛ دستور قدیمی `curl ... | bash` برای این نسخه مناسب نیست و تا زمانی که مخزن را به‌روز نکرده‌اید همان نسخه قدیمی را نصب می‌کند.
 
-Install:
+## قابلیت‌ها
+
+- کارت سرورها: نام، IP/دامنه، پورت، نام کاربری، گروه، یادداشت، علاقه‌مندی، جست‌وجو و کپی IP.
+- Keychain مشترک بین سرورهای همان کاربر: رمز یا کلید خصوصی SSH با Passphrase. داده حساس با Fernet رمزنگاری می‌شود و API رمز/کلید ذخیره‌شده را پس نمی‌فرستد.
+- ترمینال تعاملی واقعی WebSocket/xterm.js: رنگ، nano/top، تغییر اندازه، تب‌های هم‌زمان، کلیدهای کمکی و خروجی اسکرول‌شونده.
+- ۸ تب در رابط، ۵۰هزار خط scrollback؛ ذخیره ۱۰ مگابایت آخر خروجی خام همراه ANSI. خروجی در پیام تلگرام بریده نمی‌شود، اما حافظه نامحدود نیست.
+- آپلود چند فایل از داخل ترمینال فعال؛ هر فایل حداکثر ۵۰ مگابایت. فایل هم‌نام بازنویسی نمی‌شود.
+- فقط مالک و آیدی‌های مجاز؛ اطلاعات سرور و Keychain هر کاربر مستقل. لغو دسترسی، اتصال‌های فعال آن کاربر را می‌بندد.
+- اعتبارسنجی HMAC داده Mini App، جلسه ۸ساعته، Cookie امن/HttpOnly، کنترل Origin و بلیت یک‌بارمصرف WebSocket.
+- تأیید صریح اثر انگشت SSH در اولین اتصال؛ تغییر کلید بدون تأیید دوباره رد می‌شود.
+- نصب Ubuntu 22.04/24.04: Python venv، systemd، Nginx، Let's Encrypt، تمدید SSL و دکمه Web App ربات.
+- انتقال یک‌باره اطلاعات v3/v5 از مسیر پیش‌فرض، با حفظ فایل‌های قدیمی و بسته بودن پیش‌فرض دسترسی کاربران منتقل‌شده.
+
+## محدودیت‌های مشخص
+
+- ورود از طریق دکمه ربات تلگرام است؛ صفحه بازشده مستقیم در مرورگر مستقل، بدون جلسه قبلی، ورود رمزدار جدا ندارد.
+- Keychain داخلی است؛ همگام‌سازی با حساب Termius یا Apple iCloud Keychain ندارد.
+- سرور برنامه واسطه SSH است و هنگام اتصال به اطلاعات ورود دسترسی دارد؛ مدیر root می‌تواند به کلید رمزنگاری دسترسی پیدا کند. رمزنگاری سرتاسری یا محافظت در برابر root ادعا نمی‌شود.
+- بستن Mini App، قطع WebSocket یا restart سرویس اتصال را می‌بندد. برای کار طولانی روی سرور مقصد از tmux استفاده کنید.
+- SFTP در این نسخه آپلود است؛ مرورگر فایل، دانلود SFTP، port forwarding و SSH jump host پیاده‌سازی نشده‌اند.
+- اطلاعات کاربران مشترک نمی‌شود. افزودن آیدی فقط اجازه استفاده می‌دهد؛ سرورهای مالک به آن کاربر نمایش داده نمی‌شود.
+- نصب خودکار در صورت اشغال پورت 80/443 توسط Apache/Caddy یا سرویس غیر Nginx متوقف می‌شود؛ به سرویس موجود دست نمی‌زند.
+- برای اجرای برنامه فقط یک worker مجاز است؛ بلیت‌ها و اتصال‌ها در حافظه همان پردازش نگهداری می‌شوند.
+
+## توسعه و تست
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/0fariid0/SSHBot/main/install.sh | sudo bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt pytest
+.venv/bin/python -m pytest -q tests
 ```
 
-Or:
+تست رابط اختیاری: `pip install playwright`، سپس `playwright install chromium` و `python tests/ui_smoke.py`؛ داده‌های این تست ساختگی‌اند و هیچ حالت ورود آزمایشی در برنامه اصلی وجود ندارد.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/0fariid0/SSHBot/main/install.sh | sudo BOT_TOKEN='YOUR_TOKEN' bash
-```
+اجرا نیازمند فایل config واقعی در `/etc/sshbot-web/config.json` یا متغیر `SSHBOT_CONFIG` است. نصب‌کننده این فایل را می‌سازد؛ توکن را در Git قرار ندهید.
 
-Check:
+سورس اولیه بررسی‌شده: https://github.com/0fariid0/SSHBot — commit `891832e0c8cec3abafbc04bc0a98f29d095a393b`.
+فایل‌های قدیمی `ssh-bot.py` و `ssh-bot-v3.py` برای مرجع و برگشت حفظ شده‌اند؛ سرویس جدید از `web/app.py` استفاده می‌کند.
 
-```bash
-grep BOT_VERSION /opt/sshbot/ssh-bot.py
-journalctl -u sshbot -n 80 --no-pager
-```
-
-Telegram:
-
-```text
-/version
-```
+مستندات مبنا: [Telegram Mini Apps](https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app)، [AsyncSSH](https://asyncssh.readthedocs.io/en/latest/)، [xterm.js](https://xtermjs.org/).
