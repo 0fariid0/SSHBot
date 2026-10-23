@@ -84,8 +84,13 @@ def ssh_server(tmp_path):
     loop=asyncio.new_event_loop()
     ready=threading.Event()
     state={}
+    connections=set()
     key=asyncssh.generate_private_key('ssh-ed25519')
     class Server(asyncssh.SSHServer):
+        def connection_made(self, conn):
+            self.conn=conn;connections.add(conn)
+        def connection_lost(self, exc):
+            connections.discard(self.conn)
         def begin_auth(self, username): return True
         def password_auth_supported(self): return True
         def validate_password(self, username, password): return username=='root' and password=='testpass'
@@ -107,7 +112,11 @@ def ssh_server(tmp_path):
     state.update(key=key, directory=tmp_path)
     yield state
     async def stop():
+        for conn in list(connections):conn.abort()
         state['server'].close();await state['server'].wait_closed()
+        pending=[task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        for task in pending:task.cancel()
+        if pending:await asyncio.gather(*pending,return_exceptions=True)
     asyncio.run_coroutine_threadsafe(stop(),loop).result(5)
     loop.call_soon_threadsafe(loop.stop);thread.join(5);loop.close()
 
@@ -202,3 +211,15 @@ def test_live_session_expires_on_logout(env,ssh_server):
         ws.receive_bytes()
         c.post('/api/logout')
         assert ws.receive()['type']=='websocket.close'
+
+
+def test_configurable_limits(env):
+    mod,c=env
+    path=os.environ['SSHBOT_CONFIG']
+    cfg=json.loads(open(path).read());cfg.update(session_hours=2,max_sessions=2,upload_mb=5)
+    with open(path,'w') as f:json.dump(cfg,f)
+    mod=importlib.reload(mod)
+    with TestClient(mod.app,base_url=ORIGIN,headers={'origin':ORIGIN}) as client:
+        r=client.post('/api/login',json={'init_data':init_data()})
+        assert 'Max-Age=7200' in r.headers['set-cookie']
+        assert client.get('/api/me').json()['limits']=={'session_hours':2,'max_sessions':2,'upload_mb':5}

@@ -25,6 +25,10 @@ TOKEN = CONFIG['bot_token']
 ORIGIN = CONFIG['public_url'].rstrip('/')
 if OWNER <= 0 or not ORIGIN.startswith('https://') or not TOKEN:
     raise RuntimeError('Owner, bot token and HTTPS URL are required')
+SESSION_SECONDS = max(1, min(24, int(CONFIG.get('session_hours', 8)))) * 3600
+MAX_SESSIONS = max(1, min(8, int(CONFIG.get('max_sessions', 8))))
+UPLOAD_MB = max(1, min(50, int(CONFIG.get('upload_mb', 50))))
+connecting = {}
 store = Store(CONFIG.get('data_dir', '/var/lib/sshbot-web'))
 tickets = {}
 active = {}
@@ -135,8 +139,8 @@ async def login(data: Login, response: Response):
     token = secrets.token_urlsafe(32)
     with store.db() as db:
         db.execute('DELETE FROM sessions WHERE expires<?', (time.time(),))
-        db.execute('INSERT INTO sessions VALUES(?,?,?)', (digest(token), uid, int(time.time()) + 28800))
-    response.set_cookie('sshbot_session', token, max_age=28800, secure=True, httponly=True, samesite='none')
+        db.execute('INSERT INTO sessions VALUES(?,?,?)', (digest(token), uid, int(time.time()) + SESSION_SECONDS))
+    response.set_cookie('sshbot_session', token, max_age=SESSION_SECONDS, secure=True, httponly=True, samesite='none')
     store.log(uid, 'login')
     return {'ok': True}
 
@@ -152,7 +156,7 @@ def logout(request: Request, response: Response):
 @app.get('/api/me')
 def me(request: Request):
     uid = identity(request)
-    return {'id': uid, 'owner': uid == OWNER}
+    return {'id': uid, 'owner': uid == OWNER, 'limits': {'max_sessions': MAX_SESSIONS, 'upload_mb': UPLOAD_MB, 'session_hours': SESSION_SECONDS // 3600}}
 
 
 class Host(BaseModel):
@@ -373,9 +377,10 @@ async def terminal(ws: WebSocket):
             await ws.close(code=4401)
             return
         uid = t['uid']
-        if sum(a['uid'] == uid for a in active.values()) >= 8:
-            await ws.send_json({'error': 'حداکثر ۸ ترمینال هم‌زمان.'})
+        if sum(a['uid'] == uid for a in active.values()) + sum(u == uid for u in connecting.values()) >= MAX_SESSIONS:
+            await ws.send_json({'error': f'حداکثر {MAX_SESSIONS} ترمینال هم‌زمان.'})
             return
+        connecting[sid] = uid
         h = item(uid, 'host', t['host'])
         c = item(uid, 'credential', h['credential_id'])
         secret = store.decrypt(c['encrypted'])
@@ -383,6 +388,7 @@ async def terminal(ws: WebSocket):
         conn = await asyncio.wait_for(asyncssh.connect(h['host'], port=h['port'], username=h['username'], password=secret['secret'] if c['kind'] == 'password' else None, client_keys=keys, agent_path=None, config=None, known_hosts=b'', client_factory=lambda: PinnedClient(h['fingerprint']), login_timeout=15, keepalive_interval=30, keepalive_count_max=3), 20)
         proc = await conn.create_process(term_type='xterm-256color', term_size=(100, 30), encoding=None)
         active[sid] = {'uid': uid, 'conn': conn}
+        connecting.pop(sid, None)
         h['last_used'] = int(time.time())
         store.put(uid, 'host', t['host'], h)
         store.log(uid, 'connect', t['host'])
@@ -425,16 +431,23 @@ async def terminal(ws: WebSocket):
         with contextlib.suppress(Exception):
             await ws.send_json({'error': message})
     finally:
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        # Close the SSH transport before any cancellable await, including client disconnect.
+        connecting.pop(sid, None)
         active.pop(sid, None)
         if conn:
             conn.close()
-            await conn.wait_closed()
+        for task in tasks:
+            task.cancel()
         if uid:
             store.log(uid, 'disconnect', sid)
+        try:
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if conn:
+                await asyncio.wait_for(conn.wait_closed(), 5)
+        finally:
+            if conn:
+                conn.abort()
         with contextlib.suppress(Exception):
             await ws.close()
 
@@ -459,8 +472,8 @@ async def upload(sid: str, request: Request, file: UploadFile = File(...), direc
                         if not authorized(uid):
                             raise HTTPException(403, 'دسترسی لغو شد.')
                         size += len(chunk)
-                        if size > 50 * 1024 * 1024:
-                            raise HTTPException(413, 'حداکثر حجم هر فایل ۵۰ مگابایت است.')
+                        if size > UPLOAD_MB * 1024 * 1024:
+                            raise HTTPException(413, f'حداکثر حجم هر فایل {UPLOAD_MB} مگابایت است.')
                         await remote.write(chunk)
                 except BaseException:
                     await remote.close()
@@ -476,7 +489,7 @@ async def upload(sid: str, request: Request, file: UploadFile = File(...), direc
 
 @app.get('/health')
 def health():
-    return {'ok': True, 'version': '6.0.0'}
+    return {'ok': True, 'version': '6.1.0'}
 
 
 @app.get('/')
