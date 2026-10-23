@@ -29,3 +29,7 @@ Base upstream commit: 891832e0c8cec3abafbc04bc0a98f29d095a393b.
 - Unknown hosting-panel, Docker, multi-layer proxy or custom webserver layouts; these may require manual review and are conservatively rejected where detected.
 
 Package/module installation is not transactional. File rollback concerns registered SSHBot paths, not arbitrary package changes or external Telegram/network failures. Review the installation guide before applying to a production server.
+
+## GitHub bootstrap update
+
+34 tests pass after adding five bootstrap tests: piped invocation with a complete fixture archive, incomplete package rejection, traversal rejection, download failure, and local checkout installation path. Temporary download cleanup is verified. `bash -n install.sh` passes. Downloads are mocked; no live GitHub deployment, interactive remote SSH session, systemd installation, or SSL issuance was performed by these tests.

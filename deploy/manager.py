@@ -737,7 +737,7 @@ def main():
                 choice=ask('انتخاب')
                 if choice=='0':break
                 if choice=='1':
-                    if not args.source:raise ManagerError('برای ارتقا، بسته جدید را استخراج و sudo bash install.sh را از آن اجرا کنید.')
+                    if not args.source:raise ManagerError('برای ارتقا، دستور curl نصب GitHub را دوباره اجرا کنید؛ یا بسته جدید را استخراج و sudo bash install.sh را از آن اجرا کنید.')
                     apply_config(new_config(),args.source.resolve())
                 elif choice in ('2','3','4','5','6'):settings(choice)
                 elif choice=='7':users_menu()

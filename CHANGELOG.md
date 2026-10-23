@@ -1,3 +1,10 @@
+## GitHub installer update
+
+- Restore `curl -fsSL .../main/install.sh | sudo bash` support by fetching the full main-branch archive.
+- Read interactive menu input from `/dev/tty`; preserve local checkout and noninteractive `--status` support.
+- Validate archive paths/types/expanded size and clean temporary downloads on exit.
+- Document publishing the complete package at the GitHub repository root before using the URL.
+
 # 6.1.0
 
 - Replace one-shot Nginx installer with root-only Python management menu and installed `sshbot-manager` command.
