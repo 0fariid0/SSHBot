@@ -1,3 +1,8 @@
+## Finglish installer menu
+
+- Convert all manager menu labels, prompts, status messages and errors to readable Finglish using ASCII only.
+- Preserve installation and service management logic.
+
 ## GitHub installer update
 
 - Restore `curl -fsSL .../main/install.sh | sudo bash` support by fetching the full main-branch archive.

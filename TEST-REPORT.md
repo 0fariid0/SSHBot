@@ -33,3 +33,7 @@ Package/module installation is not transactional. File rollback concerns registe
 ## GitHub bootstrap update
 
 34 tests pass after adding five bootstrap tests: piped invocation with a complete fixture archive, incomplete package rejection, traversal rejection, download failure, and local checkout installation path. Temporary download cleanup is verified. `bash -n install.sh` passes. Downloads are mocked; no live GitHub deployment, interactive remote SSH session, systemd installation, or SSL issuance was performed by these tests.
+
+## Finglish menu update
+
+All 34 tests pass. The complete manager source is ASCII-only. An AST comparison against the previous packaged manager, with string constants normalized, confirms that only text changed. Python compilation passes.

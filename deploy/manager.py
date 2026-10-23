@@ -50,7 +50,7 @@ def run(*args, check=True, capture=True, timeout=120, input=None, env=None):
                             capture_output=capture, timeout=timeout, env=env)
     if check and result.returncode:
         # Arguments never contain a bot token; HTTP operations use in-memory payloads.
-        raise ManagerError(f"فرمان ناموفق: {args[0]}\n" + (result.stderr or result.stdout or '')[-3000:])
+        raise ManagerError(f"Dastoor ejra nashod: {args[0]}\n" + (result.stderr or result.stdout or '')[-3000:])
     return result
 
 
@@ -68,18 +68,18 @@ def read_config():
 def validate(c):
     domain = c['public_url'].removeprefix('https://')
     if c['public_url'] != 'https://' + domain or len(domain) > 253 or not re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}', domain):
-        raise ManagerError('دامنه معتبر نیست؛ فقط نام دامنه بدون مسیر وارد کنید.')
+        raise ManagerError('Domain motabar nist; faghat name domain ra bedoon masir vared konid.')
     if not re.fullmatch(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', c.get('email', '')):
-        raise ManagerError('ایمیل معتبر لازم است.')
+        raise ManagerError('Email motabar lazem ast.')
     if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]{15,}', c.get('bot_token', '')):
-        raise ManagerError('توکن ربات معتبر نیست.')
+        raise ManagerError('Token robot motabar nist.')
     for field, low, high in [('owner_id',1,2**53-1),('listen_port',1024,65535),('session_hours',1,24),('max_sessions',1,8),('upload_mb',1,50),('memory_mb',256,4096),('cpu_percent',10,400)]:
         if type(c.get(field)) is not int or not low <= c[field] <= high:
-            raise ManagerError(f'مقدار {field} باید بین {low} و {high} باشد.')
+            raise ManagerError(f'Meghdar {field} bayad bein {low} va {high} bashad.')
     if c.get('web_server') not in ('apache2','nginx'):
-        raise ManagerError('وب‌سرور ناشناخته است.')
+        raise ManagerError('Web server nashenakhte ast.')
     if c.get('data_dir') != str(DATA):
-        raise ManagerError('مسیر داده سفارشی نیاز به انتقال دستی دارد؛ تغییری اعمال نشد.')
+        raise ManagerError('Masir data sefareshi ast; enteqal dasti lazem ast. Taghiri emal nashod.')
     return domain
 
 
@@ -111,7 +111,7 @@ def choose_port():
     for port in range(8765, 8865):
         if free_port(port):
             return port
-    raise ManagerError('پورت آزاد در بازه پیش‌فرض پیدا نشد.')
+    raise ManagerError('Port azad dar baze pishfarz peyda nashod.')
 
 
 def detect_web():
@@ -121,20 +121,20 @@ def detect_web():
         for line in rows.splitlines():
             names = re.findall(r'\("([^"]+)"', line)
             if not names or any(n not in ('apache2','nginx') for n in names):
-                raise ManagerError(f'پورت {port} در اختیار سرویس دیگری است؛ معماری دستی لازم است. هیچ سرویسی متوقف نشد.')
+                raise ManagerError(f'Port {port} dar ekhtiar service digari ast; tanzim dasti lazem ast. Hich service motevaghef nashod.')
             owners.update(names)
     if len(owners) > 1:
-        raise ManagerError('Apache و Nginx هم‌زمان روی پورت‌های عمومی هستند؛ تنظیم ترکیبی نیاز به بررسی دستی دارد.')
+        raise ManagerError('Apache va Nginx hamzaman rooye port haye omoomi hastand; tanzim tarkibi niaz be barrasi dasti darad.')
     if owners:
         server = owners.pop()
         if not active(server):
-            raise ManagerError('مالک پورت با سرویس استاندارد سیستم تطبیق ندارد.')
+            raise ManagerError('Malek port ba service standard system tatbigh nadarad.')
         return server
     for service in ('apache2','nginx'):
         if active(service):
             return service
     if Path('/etc/apache2/apache2.conf').exists() or Path('/etc/nginx/nginx.conf').exists():
-        raise ManagerError('وب‌سرور نصب است ولی فعال نیست؛ ابتدا وضعیت آن را مشخص کنید.')
+        raise ManagerError('Web server nasb ast vali faal nist; ebteda vaziyat an ra moshakhas konid.')
     return 'apache2'
 
 
@@ -174,11 +174,11 @@ def domain_conflict(domain, server):
         for name in names:
             name=name.strip('"\'').lower().split(':')[0]
             if name.startswith('~'):
-                raise ManagerError(f'دامنه regex در {p} نیاز به بررسی دستی دارد.')
+                raise ManagerError(f'Domain regex dar {p} niaz be barrasi dasti darad.')
             if name in ('_',''):
                 continue
             if domain==name or fnmatch.fnmatchcase(domain,name) or (name.startswith('.') and (domain==name[1:] or domain.endswith(name))):
-                raise ManagerError(f'دامنه با سایت موجود در {p} تداخل دارد؛ زیردامنه دیگری انتخاب کنید.')
+                raise ManagerError(f'Domain ba site mojood dar {p} tadakhol darad; subdomain digari entekhab konid.')
 
 
 def telegram(token, method, payload=None):
@@ -192,17 +192,17 @@ def telegram(token, method, payload=None):
         return obj['result']
     except Exception:
         # Never include URLs, which contain the bot token.
-        raise ManagerError(f'ارتباط Telegram برای {method} ناموفق بود؛ توکن و شبکه را بررسی کنید.') from None
+        raise ManagerError(f'Ertebat Telegram baraye {method} namovafagh bood; token va shabake ra barrasi konid.') from None
 
 
 def bot_preflight(c):
     bot=telegram(c['bot_token'],'getMe')
     hook=telegram(c['bot_token'],'getWebhookInfo')
     if hook.get('url'):
-        raise ManagerError('این توکن Webhook فعال دارد؛ احتمالاً متعلق به ربات فروش است. توکن جدا وارد کنید. Webhook حذف نشد.')
+        raise ManagerError('In token Webhook faal darad; ehtemalan male robot foroosh ast. Token joda vared konid. Webhook hazf nashod.')
     legacy=Path('/etc/sshbot.env')
     if legacy.exists() and c['bot_token'] in legacy.read_text() and active('sshbot'):
-        raise ManagerError('همین توکن در سرویس قدیمی sshbot فعال است. آن سرویس خودکار متوقف نمی‌شود؛ از توکن جدا استفاده کنید یا انتقال را دستی انجام دهید.')
+        raise ManagerError('Hamin token dar service ghadimi sshbot faal ast. An service khodkar motevaghef nemishavad; az token joda estefade konid ya enteqal ra dasti anjam dahid.')
     return bot
 
 
@@ -391,7 +391,7 @@ def snapshot(label='manual'):
         for p in [UNIT,RENEW_UNIT,RENEW_TIMER,*site_paths(c.get('web_server','nginx')),*old_v6_paths()]:
             if p.exists() and not p.is_symlink():
                 target=dest/'files'/str(p).lstrip('/');target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,target)
-    print('پشتیبان خصوصی:',dest)
+    print('Backup khosoosi:',dest)
     return dest
 
 
@@ -415,7 +415,7 @@ def web_dependencies(server):
 
 def prepare_release(source):
     if not (source/'web/app.py').exists() or not (source/'requirements.txt').exists():
-        raise ManagerError('بسته کامل سورس را استخراج کنید.')
+        raise ManagerError('Baste kamel source ra extract konid.')
     release=APP/'releases'/(time.strftime('%Y%m%d-%H%M%S')+'-'+secrets.token_hex(3))
     release.mkdir(parents=True,mode=0o755)
     shutil.copytree(source/'web',release/'web',ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
@@ -433,22 +433,22 @@ def prepare_release(source):
 def owned_preflight(c):
     for p in site_paths(c['web_server']):
         if p.exists() and MARKER not in p.read_text():
-            raise ManagerError(f'فایل {p} متعلق به این مدیر نیست؛ بازنویسی نشد.')
+            raise ManagerError(f'File {p} male in manager nist; baznevisi nashod.')
     if UNIT.exists() and '/opt/sshbot-web/' not in UNIT.read_text():
-        raise ManagerError('نام سرویس sshbot-web قبلاً برای برنامه دیگری استفاده شده است.')
+        raise ManagerError('Name service sshbot-web ghablan baraye barname digari estefade shode ast.')
     for p in (RENEW_UNIT,RENEW_TIMER):
         if p.exists() and MARKER not in p.read_text():
-            raise ManagerError('نام سرویس تمدید SSL با سرویس موجود تداخل دارد.')
+            raise ManagerError('Name service tamdid SSL ba service mojood tadakhol darad.')
     if HOOK.exists() and MARKER not in HOOK.read_text():
-        raise ManagerError('فایل hook تمدید SSL با نام یکسان متعلق به این مدیر نیست.')
+        raise ManagerError('File hook tamdid SSL ba name yeksan male in manager nist.')
     if COMMAND.exists() and 'SSHBot' not in COMMAND.read_text():
-        raise ManagerError('فرمان sshbot-manager متعلق به برنامه دیگری است.')
+        raise ManagerError('Dastoor sshbot-manager male barname digari ast.')
     if (APP/'current').exists() and not (APP/'current').is_symlink():
-        raise ManagerError('مسیر current ناشناخته است.')
+        raise ManagerError('Masir current nashenakhte ast.')
     if not CONFIG.exists() and DATA.exists() and any(DATA.iterdir()):
-        raise ManagerError('مسیر داده موجود است ولی تنظیمات مالکیت SSHBot پیدا نشد؛ بررسی دستی لازم است.')
+        raise ManagerError('Masir data mojood ast vali tanzimat malekiat SSHBot peyda nashod; barrasi dasti lazem ast.')
     if c.get('web_server')=='nginx' and not Path('/etc/nginx/sites-enabled').exists() and Path('/etc/nginx/nginx.conf').exists():
-        raise ManagerError('Nginx شما ساختار sites-enabled استاندارد ندارد؛ بررسی دستی لازم است.')
+        raise ManagerError('Nginx shoma sakhtar sites-enabled standard nadarad; barrasi dasti lazem ast.')
 
 
 def certbot_args():
@@ -469,36 +469,36 @@ def health(c):
                 if json.load(r).get('version')=='6.1.0':break
         except Exception:pass
         time.sleep(.5)
-    else:raise ManagerError('سرویس جدید سالم بالا نیامد؛ تنظیمات قبلی بازگردانده می‌شود.')
+    else:raise ManagerError('Service jadid salem bala nayamad; tanzimat ghabli bargardande mishavad.')
     # Explicit domain routes check locally and publicly, with TLS certificate validation.
     for extra in [[],['--resolve',f"{c['public_url'][8:]}:443:127.0.0.1"]]:
         response=run('curl','--noproxy','*','-fsS','--max-time','15',*extra,c['public_url']+'/health')
-        if json.loads(response.stdout).get('version')!='6.1.0':raise ManagerError('دامنه به برنامه جدید نمی‌رسد.')
+        if json.loads(response.stdout).get('version')!='6.1.0':raise ManagerError('Domain be barname jadid nemiresad.')
 
 
 def apply_config(c,source=None):
     old=read_config()
     if not source and not (APP/'current/venv/bin/python').exists():
-        raise ManagerError('برای ارتقای نسخه قبلی ابتدا گزینه ۱ را از بسته جدید اجرا کنید.')
+        raise ManagerError('Baraye ertegha noskhe ghabli ebteda gozine 1 ra az baste jadid ejra konid.')
     domain=validate(c)
     detected=detect_web()
     if detected!=c['web_server']:
-        raise ManagerError('وب‌سرور تشخیص‌داده‌شده با تنظیمات یکسان نیست؛ تغییر معماری خودکار انجام نمی‌شود.')
+        raise ManagerError('Web server tashkhis dade shode ba tanzimat yeksan nist; taghir memari khodkar anjam nemishavad.')
     owned_preflight(c);domain_conflict(domain,c['web_server'])
     if not old or old['listen_port']!=c['listen_port'] or not active(SERVICE):
-        if not free_port(c['listen_port']):raise ManagerError('پورت داخلی انتخاب‌شده اشغال است.')
+        if not free_port(c['listen_port']):raise ManagerError('Port dakheli entekhab shode eshghal ast.')
     try:socket.getaddrinfo(domain,80)
-    except socket.gaierror:raise ManagerError('دامنه resolve نمی‌شود؛ ابتدا DNS را تنظیم کنید.')
+    except socket.gaierror:raise ManagerError('Domain resolve nemishavad; ebteda DNS ra tanzim konid.')
     if shutil.disk_usage('/opt').free < 512*1024*1024:
-        raise ManagerError('کمتر از ۵۱۲ مگابایت فضای آزاد برای نصب و پشتیبان وجود دارد.')
+        raise ManagerError('Kamtar az 512 MB fazaye azad baraye nasb va backup vojood darad.')
     mem=re.search(r'^MemAvailable:\s+(\d+)',Path('/proc/meminfo').read_text(),re.M)
     if mem and int(mem.group(1))<128*1024:
-        raise ManagerError('حافظه آزاد برای نصب کم است؛ ابتدا منابع سرور را بررسی کنید.')
+        raise ManagerError('Hafeze azad baraye nasb kam ast; ebteda manabe server ra barrasi konid.')
     bot=bot_preflight(c)
     previous_menu=telegram(c['bot_token'],'getChatMenuButton')
-    print(f"وب‌سرور: {detected} | دامنه: {domain} | پورت داخلی: {c['listen_port']} | ربات: @{bot['username']}")
-    print('فقط فایل‌های SSHBot تغییر می‌کنند. اتصال‌های SSHBot هنگام اعمال تنظیمات بسته خواهند شد.')
-    if input('برای اعمال بنویسید yes: ').strip()!='yes':return
+    print(f"Web server: {detected} | Domain: {domain} | Port dakheli: {c['listen_port']} | Robot: @{bot['username']}")
+    print('Faghat file haye SSHBot taghir mikonand. Etesal haye SSHBot hengam emal tanzimat baste khahand shod.')
+    if input('Baraye emal benevisid yes: ').strip()!='yes':return
     snapshot('before-change')
     if active(detected):
         test_web(detected)
@@ -506,15 +506,15 @@ def apply_config(c,source=None):
             vhosts=run('apache2ctl','-S')
             for filename in re.findall(r'\((/[^():]+):\d+\)',vhosts.stdout+vhosts.stderr):
                 if not filename.startswith('/etc/apache2/'):
-                    raise ManagerError('VirtualHost خارج از مسیر استاندارد Apache دیده شد؛ بررسی دستی لازم است.')
+                    raise ManagerError('VirtualHost kharej az masir standard Apache dide shod; barrasi dasti lazem ast.')
             if not re.search(r'(?:\*:80|port 80|:80\s)', vhosts.stdout+vhosts.stderr):
-                raise ManagerError('Apache سایت اصلی بدون VirtualHost دارد؛ برای حفظ مسیرهای موجود، تنظیم دستی لازم است.')
+                raise ManagerError('Apache site asli bedoon VirtualHost darad; baraye hefz masir haye mojood tanzim dasti lazem ast.')
     web_dependencies(detected)
     test_web(detected)
     release=prepare_release(source) if source else APP/'current'
     if not (release/'venv/bin/python').exists():
         # Upgrade v6.0 must be executed from the new extracted package.
-        raise ManagerError('نسخه ۶.۱ نصب نیست؛ گزینه نصب/ارتقا را از بسته جدید اجرا کنید.')
+        raise ManagerError('Noskhe 6.1 nasb nist; gozine nasb/ertegha ra az baste jadid ejra konid.')
     try:account=pwd.getpwnam('sshbot-web')
     except KeyError:
         run('useradd','--system','--home',DATA,'--shell','/usr/sbin/nologin','sshbot-web');account=pwd.getpwnam('sshbot-web')
@@ -541,7 +541,7 @@ def apply_config(c,source=None):
             challenge.write_text(probe);os.chmod(challenge,0o644)
             try:
                 response=run('curl','--noproxy','*','-fsS','--max-time','15',f'http://{domain}/.well-known/acme-challenge/{probe}')
-                if response.stdout!=probe:raise ManagerError('دامنه/پروکسی به این VPS نمی‌رسد؛ SSL درخواست نشد.')
+                if response.stdout!=probe:raise ManagerError('Domain/proxy be in VPS nemiresad; SSL darkhast nashod.')
             finally:challenge.unlink(missing_ok=True)
             issue_cert(c)
         for p in old_v6_paths():tx.remove(p)
@@ -567,20 +567,20 @@ def apply_config(c,source=None):
         telegram(c['bot_token'],'setChatMenuButton',{'menu_button':{'type':'web_app','text':'SSHBot','web_app':{'url':c['public_url']}}})
         run('systemctl','enable',SERVICE)
         run('systemctl','enable','--now','sshbot-web-certbot.timer')
-        print('✓ اعمال شد. منوی بعدی: sudo sshbot-manager')
+        print('OK: Emal shod. Menu modiriat: sudo sshbot-manager')
     except BaseException:
-        print('خطا: بازگردانی فایل‌ها و سرویس SSHBot به حالت قبلی…')
+        print('Khata: Bargardani file ha va service SSHBot be halat ghabli...')
         run('systemctl','stop',SERVICE,check=False)
         if not timer_was_active:run('systemctl','stop','sshbot-web-certbot.timer',check=False)
         if not timer_was_enabled:run('systemctl','disable','sshbot-web-certbot.timer',check=False)
         if not service_was_enabled:run('systemctl','disable',SERVICE,check=False)
         tx.rollback();run('systemctl','daemon-reload',check=False)
         try:reload_web(detected)
-        except Exception:print('بازخوانی وب‌سرور ناموفق بود؛ configtest و لاگ را بررسی کنید.')
+        except Exception:print('Reload web server namovafagh bood; configtest va log ra barrasi konid.')
         if was_active:run('systemctl','start',SERVICE,check=False)
         if menu_changed:
             try:telegram(c['bot_token'],'setChatMenuButton',{'menu_button':previous_menu})
-            except Exception:print('بازگردانی دکمه Telegram ناموفق بود؛ از منوی تعمیر دکمه استفاده کنید.')
+            except Exception:print('Bargardani dokme Telegram namovafagh bood; az menu tamir dokme estefade konid.')
         raise
 
 
@@ -592,63 +592,63 @@ def ask(label,default=None,secret=False):
 
 def installed():
     c=read_config()
-    if not c:raise ManagerError('ابتدا نصب کنید.')
+    if not c:raise ManagerError('Ebteda nasb konid.')
     return c
 
 
 def new_config():
     old=read_config() or {}
     c=dict(DEFAULTS,**old)
-    c['public_url']='https://'+ask('دامنه اختصاصی، بدون https',old.get('public_url','')[8:] or None).lower()
-    c['email']=ask('ایمیل SSL',old.get('email'))
-    c['owner_id']=int(ask('آیدی عددی مالک',old.get('owner_id')))
-    c['bot_token']=ask('توکن جداگانه SSHBot؛ خالی = حفظ قبلی',old.get('bot_token'),secret=True)
+    c['public_url']='https://'+ask('Domain ekhtesasi, bedoon https',old.get('public_url','')[8:] or None).lower()
+    c['email']=ask('Email SSL',old.get('email'))
+    c['owner_id']=int(ask('ID adadi malek',old.get('owner_id')))
+    c['bot_token']=ask('Token jodagane SSHBot; khali = hefz ghabli',old.get('bot_token'),secret=True)
     c['web_server']=detect_web();c['data_dir']=str(DATA)
-    c['listen_port']=int(ask('پورت داخلی',old['listen_port'] if 'listen_port' in old else choose_port()))
+    c['listen_port']=int(ask('Port dakheli',old['listen_port'] if 'listen_port' in old else choose_port()))
     return c
 
 
 def settings(choice):
     c=installed()
-    if choice=='2':c['public_url']='https://'+ask('دامنه جدید، بدون https').lower()
-    elif choice=='3':c['bot_token']=ask('توکن جدید، مستقل از فروش',secret=True)
-    elif choice=='4':c['owner_id']=int(ask('آیدی عددی مالک جدید'))
-    elif choice=='5':c['listen_port']=int(ask('پورت داخلی جدید',choose_port()))
+    if choice=='2':c['public_url']='https://'+ask('Domain jadid, bedoon https').lower()
+    elif choice=='3':c['bot_token']=ask('Token jadid, mostaghel az foroosh',secret=True)
+    elif choice=='4':c['owner_id']=int(ask('ID adadi malek jadid'))
+    elif choice=='5':c['listen_port']=int(ask('Port dakheli jadid',choose_port()))
     elif choice=='6':
-        c['email']=ask('ایمیل SSL',c.get('email'))
-        for key,label in [('session_hours','اعتبار ورود به ساعت (۱ تا ۲۴)'),('max_sessions','تعداد اتصال هم‌زمان هر کاربر (۱ تا ۸)'),('upload_mb','حداکثر آپلود MB (۱ تا ۵۰)'),('memory_mb','حد حافظه MB (۲۵۶ تا ۴۰۹۶)'),('cpu_percent','سقف CPU درصد (۱۰ تا ۴۰۰؛ ۱۰۰ = یک هسته)')]:
+        c['email']=ask('Email SSL',c.get('email'))
+        for key,label in [('session_hours','Etebar vorood be saat (1 ta 24)'),('max_sessions','Tedad etesal hamzaman har karbar (1 ta 8)'),('upload_mb','Hadaksar upload MB (1 ta 50)'),('memory_mb','Had hafeze MB (256 ta 4096)'),('cpu_percent','Saghf CPU darsad (10 ta 400; 100 = yek haste)')]:
             c[key]=int(ask(label,c[key]))
     apply_config(c)
 
 
 def users_menu():
     c=installed();db_path=DATA/'vault.sqlite3'
-    if not db_path.exists():raise ManagerError('دیتابیس هنوز ساخته نشده است.')
-    print('مالک:',c['owner_id'],' | کاربران:',[r[0] for r in app_sql('SELECT uid FROM users',fetch=True)])
-    action=ask('1 افزودن | 2 لغو دسترسی | Enter برگشت')
+    if not db_path.exists():raise ManagerError('Database hanooz sakhte nashode ast.')
+    print('Malek:',c['owner_id'],' | Karbaran:',[r[0] for r in app_sql('SELECT uid FROM users',fetch=True)])
+    action=ask('1 Ezafe | 2 Laghv dastresi | Enter Bargasht')
     if action not in ('1','2'):return
-    uid=int(ask('آیدی عددی'))
-    if not 0<uid<2**53 or uid==c['owner_id']:raise ManagerError('آیدی نامعتبر یا متعلق به مالک است.')
+    uid=int(ask('ID adadi'))
+    if not 0<uid<2**53 or uid==c['owner_id']:raise ManagerError('ID namotabar ya male malek ast.')
     if action=='1':app_sql('INSERT OR IGNORE INTO users VALUES(?)',(uid,))
     else:
         app_sql('DELETE FROM users WHERE uid=?',(uid,));app_sql('DELETE FROM sessions WHERE uid=?',(uid,))
-    print('انجام شد؛ لغو دسترسی حداکثر طی یک ثانیه اتصال‌های همان کاربر را می‌بندد.')
+    print('Anjam shod; laghv dastresi hadaksar ta 1 sanie etesal haye haman karbar ra mibandad.')
 
 
 def restore_data():
     installed()
     candidates=sorted(p for p in BACKUPS.glob('*') if p.is_dir() and (p/'vault.sqlite3').exists() and (p/'vault.key').exists())
     for i,p in enumerate(candidates,1):print(i,p.name)
-    if not candidates:raise ManagerError('پشتیبان داده پیدا نشد.')
-    idx=int(ask('شماره پشتیبان'))-1
-    if not 0<=idx<len(candidates):raise ManagerError('شماره نامعتبر است.')
+    if not candidates:raise ManagerError('Backup data peyda nashod.')
+    idx=int(ask('Shomare backup'))-1
+    if not 0<=idx<len(candidates):raise ManagerError('Shomare namotabar ast.')
     target=candidates[idx]
     with contextlib.closing(sqlite3.connect(f'file:{target}/vault.sqlite3?mode=ro',uri=True)) as db:
-        if db.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise ManagerError('پشتیبان خراب است.')
+        if db.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise ManagerError('Backup kharab ast.')
     verify="import json,sqlite3,sys; from pathlib import Path; from cryptography.fernet import Fernet; p=Path(sys.argv[1]); f=Fernet((p/'vault.key').read_bytes()); db=sqlite3.connect('file:'+str(p/'vault.sqlite3')+'?mode=ro',uri=True); [f.decrypt(json.loads(row[0])['encrypted'].encode()) for row in db.execute(\"SELECT body FROM items WHERE kind='credential'\")]; db.close()"
     run(APP/'current/venv/bin/python','-c',verify,target)
-    print('فقط سرورها، Keychain و کاربران بازیابی می‌شوند. دامنه، توکن و مالک فعلی حفظ می‌شوند. نشست‌ها باطل می‌شوند.')
-    if ask('برای جایگزینی داده فعلی بنویسید RESTORE')!='RESTORE':return
+    print('Faghat server ha, Keychain va karbaran bazyabi mishavand. Domain, token va malek feli hefz mishavand. Session ha batel mishavand.')
+    if ask('Baraye jaygozini data feli benevisid RESTORE')!='RESTORE':return
     before=snapshot('before-restore');was_active=active(SERVICE)
     run('systemctl','stop',SERVICE)
     account=pwd.getpwnam('sshbot-web')
@@ -662,16 +662,16 @@ def restore_data():
     except BaseException:copy_pair(before);raise
     finally:
         if was_active:run('systemctl','start',SERVICE)
-    print('بازیابی انجام شد.')
+    print('Bazyabi anjam shod.')
 
 
 def import_legacy():
     installed()
-    src=Path(ask('مسیر کامل servers.json قدیمی','/opt/sshbot/data/servers.json'))
-    key=Path(ask('مسیر کامل keychain.key قدیمی','/opt/sshbot/data/keychain.key'))
-    if not src.is_absolute() or not src.is_file():raise ManagerError('فایل JSON معتبر پیدا نشد.')
-    print('سرویس قدیمی متوقف نمی‌شود؛ داده قدیمی فقط خوانده می‌شود. کاربران منتقل‌شده مجوز ورود خودکار نمی‌گیرند.')
-    if ask('برای انتقال بنویسید yes')!='yes':return
+    src=Path(ask('Masir kamel servers.json ghadimi','/opt/sshbot/data/servers.json'))
+    key=Path(ask('Masir kamel keychain.key ghadimi','/opt/sshbot/data/keychain.key'))
+    if not src.is_absolute() or not src.is_file():raise ManagerError('File JSON motabar peyda nashod.')
+    print('Service ghadimi motevaghef nemishavad; data ghadimi faghat khande mishavad. Karbaran montaghel shode mojavez vorood khodkar nemigirand.')
+    if ask('Baraye enteqal benevisid yes')!='yes':return
     snapshot('before-import');was_active=active(SERVICE)
     run('systemctl','stop',SERVICE)
     try:
@@ -685,27 +685,27 @@ def import_legacy():
 
 def status():
     c=read_config()
-    print('سرویس:', 'فعال' if active(SERVICE) else 'متوقف/نصب‌نشده')
+    print('Service:', 'Faal' if active(SERVICE) else 'Motevaghef/Nasb nashode')
     if c:
-        print('دامنه:',c['public_url'],'| مالک:',c['owner_id'],'| پورت:',c['listen_port'])
-        print('توکن: مخفی | وب‌سرور:',c.get('web_server','نسخه قدیمی'))
+        print('Domain:',c['public_url'],'| Malek:',c['owner_id'],'| Port:',c['listen_port'])
+        print('Token: Makhfi | Web server:',c.get('web_server','Noskhe ghadimi'))
     run('systemctl','status',SERVICE,'--no-pager','-l',check=False,capture=False)
 
 
 def diagnostics():
-    print('مالک پورت‌های عمومی:')
+    print('Malek port haye omoomi:')
     for port in (80,443):print(run('ss','-H','-ltnp',f'sport = :{port}').stdout)
     c=read_config()
     if c:
-        print('تشخیص وب‌سرور:',detect_web());test_web(c.get('web_server','nginx'))
-        bot=bot_preflight(c);print('ربات:',bot['username'])
-        health(c);print('✓ HTTP داخلی و HTTPS سالم‌اند.')
+        print('Tashkhis web server:',detect_web());test_web(c.get('web_server','nginx'))
+        bot=bot_preflight(c);print('Robot:',bot['username'])
+        health(c);print('OK: HTTP dakheli va HTTPS salem hastand.')
 
 
 def ssl_menu():
     c=installed()
-    print('1 وضعیت SSL | 2 تست تمدید (dry-run) | 3 تمدید در صورت نیاز')
-    action=ask('انتخاب')
+    print('1 Vaziyat SSL | 2 Test tamdid (dry-run) | 3 Tamdid dar soorat niaz')
+    action=ask('Entekhab')
     if action=='1':run('certbot','certificates','--cert-name',c['certificate'],*certbot_args(),capture=False)
     elif action in ('2','3'):
         args=['certbot','renew','--cert-name',c['certificate'],*certbot_args()]
@@ -719,31 +719,31 @@ def main():
     parser.add_argument('--source',type=Path)
     parser.add_argument('--status',action='store_true')
     args=parser.parse_args()
-    if os.geteuid()!=0:raise ManagerError('با sudo اجرا کنید.')
+    if os.geteuid()!=0:raise ManagerError('Ba sudo ejra konid.')
     os.umask(0o077)
-    if not shutil.which('systemctl') or not shutil.which('ss'):raise ManagerError('Ubuntu با systemd و iproute2 لازم است.')
+    if not shutil.which('systemctl') or not shutil.which('ss'):raise ManagerError('Ubuntu ba systemd va iproute2 lazem ast.')
     osrelease=Path('/etc/os-release').read_text()
-    if not re.search(r'^ID=ubuntu$',osrelease,re.M) or not re.search(r'^VERSION_ID="(?:22\.04|24\.04)"$',osrelease,re.M):raise ManagerError('نسخه‌های پشتیبانی‌شده: Ubuntu 22.04 و 24.04')
+    if not re.search(r'^ID=ubuntu$',osrelease,re.M) or not re.search(r'^VERSION_ID="(?:22\.04|24\.04)"$',osrelease,re.M):raise ManagerError('Noskhe haye poshtibani shode: Ubuntu 22.04 va 24.04')
     with open('/run/lock/sshbot-manager.lock','w') as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:raise ManagerError('یک مدیر نصب دیگر در حال اجراست.')
+        except BlockingIOError:raise ManagerError('Yek manager nasb digar dar hal ejra ast.')
         if args.status:status();return
         while True:
-            print('\n╭──────── SSHBot 6.1 · مدیریت ────────╮')
+            print('\n========== SSHBot 6.1 | Modiriat ==========')
             current=read_config()
-            if current:print(current['public_url'], '| مالک:',current['owner_id'], '| پورت:',current['listen_port'])
-            print(' 1 نصب / ارتقا از همین بسته\n 2 تغییر دامنه + SSL + دکمه ربات\n 3 تغییر توکن ربات\n 4 تغییر مالک\n 5 تغییر پورت داخلی\n 6 تنظیمات ورود، آپلود و منابع\n 7 کاربران مجاز\n 8 وضعیت سرویس\n 9 شروع / توقف / راه‌اندازی مجدد\n10 نمایش لاگ\n11 بررسی تداخل و سلامت\n12 مدیریت SSL\n13 ساخت پشتیبان\n14 بازیابی داده\n15 تعمیر دکمه Mini App\n16 انتقال داده ربات قدیمی\n 0 خروج')
+            if current:print(current['public_url'], '| Malek:',current['owner_id'], '| Port:',current['listen_port'])
+            print(' 1 Nasb / Ertegha az hamin baste\n 2 Taghir domain + SSL + dokme robot\n 3 Taghir token robot\n 4 Taghir malek\n 5 Taghir port dakheli\n 6 Tanzimat vorood, upload va manabe\n 7 Karbaran mojaz\n 8 Vaziyat service\n 9 Shoroo / Tavaqof / Ejraye mojaddad\n10 Namayesh log\n11 Barrasi tadakhol va salamat\n12 Modiriat SSL\n13 Sakht backup\n14 Bazyabi data\n15 Tamir dokme Mini App\n16 Enteqal data robot ghadimi\n 0 Khorooj')
             try:
-                choice=ask('انتخاب')
+                choice=ask('Entekhab')
                 if choice=='0':break
                 if choice=='1':
-                    if not args.source:raise ManagerError('برای ارتقا، دستور curl نصب GitHub را دوباره اجرا کنید؛ یا بسته جدید را استخراج و sudo bash install.sh را از آن اجرا کنید.')
+                    if not args.source:raise ManagerError('Baraye ertegha, dastoor curl nasb GitHub ra dobare ejra konid; ya baste jadid ra extract va sudo bash install.sh ra az an ejra konid.')
                     apply_config(new_config(),args.source.resolve())
                 elif choice in ('2','3','4','5','6'):settings(choice)
                 elif choice=='7':users_menu()
                 elif choice=='8':status()
                 elif choice=='9':
-                    action=ask('1 شروع | 2 توقف | 3 راه‌اندازی مجدد')
+                    action=ask('1 Shoroo | 2 Tavaqof | 3 Ejraye mojaddad')
                     if action in ('1','2','3'):run('systemctl',{'1':'start','2':'stop','3':'restart'}[action],SERVICE)
                 elif choice=='10':run('journalctl','-u',SERVICE,'-n','80','--no-pager',capture=False)
                 elif choice=='11':diagnostics()
@@ -753,12 +753,12 @@ def main():
                 elif choice=='16':import_legacy()
                 elif choice=='15':
                     c=installed();bot_preflight(c)
-                    telegram(c['bot_token'],'setChatMenuButton',{'menu_button':{'type':'web_app','text':'SSHBot','web_app':{'url':c['public_url']}}});print('✓ دکمه تنظیم شد.')
+                    telegram(c['bot_token'],'setChatMenuButton',{'menu_button':{'type':'web_app','text':'SSHBot','web_app':{'url':c['public_url']}}});print('OK: Dokme tanzim shod.')
             except (ManagerError, ValueError, KeyError, OSError, subprocess.TimeoutExpired) as exc:
-                print('خطا:',str(exc))
+                print('Khata:',str(exc))
             except KeyboardInterrupt:
-                print('\nعملیات لغو شد.')
-            input('\nEnter برای برگشت به منو…')
+                print('\nAmaliat laghv shod.')
+            input('\nEnter baraye bargasht be menu...')
 
 
 if __name__=='__main__':
