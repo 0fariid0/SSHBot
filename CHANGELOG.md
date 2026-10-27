@@ -1,3 +1,13 @@
+## Terminal clipboard and configurable shortcuts — 2026-10-27
+
+- Add smart right-click (copy selection/paste), menu mode and paste-only mode, preserving Shift+right-click for the native device menu.
+- Add scoped, configurable key bindings, secondary bindings, conflict validation, defaults/reset, font controls and per-user/device local preferences.
+- Copy selected text with Ctrl+C; send SIGINT without a selection. Explicit toolbar Ctrl C continues to send SIGINT.
+- Use a single clipboard/paste path for buttons, shortcuts, context menu and native paste events; honor xterm bracketed-paste handling and guard multiline/control-character pastes.
+- Provide manual clipboard dialogs if browser permissions are unavailable/denied; guard the destination session across asynchronous clipboard access.
+- Reject oversized pastes before they can exceed the server input limit; do not persist clipboard content.
+- Add browser integration checks for clipboard, key handling, settings, context menus and saved preferences.
+
 ## Workspace layout update — 2026-10-27
 
 - Request Telegram fullscreen on supported clients; expand and provide a manual control/fallback on unsupported clients.
