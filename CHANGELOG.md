@@ -1,3 +1,13 @@
+## Workspace layout update — 2026-10-27
+
+- Request Telegram fullscreen on supported clients; expand and provide a manual control/fallback on unsupported clients.
+- Use the full available viewport height, safe area and content insets; refit xterm when the viewport/container changes.
+- Dedicated Terminals page: other pages hide the terminal while retaining live SSH sockets.
+- Persistent session tabs across the top; selecting a tab opens its terminal. Closing a background tab does not leave the current section.
+- Compact server cards, left sidebar on desktop, bottom navigation on mobile, and a focused terminal view.
+- Version static CSS/JS URLs so reopened clients fetch the new interface.
+- Frontend-only update; application health remains 6.1.0 for compatibility with installer checks.
+
 ## Finglish installer menu
 
 - Convert all manager menu labels, prompts, status messages and errors to readable Finglish using ASCII only.

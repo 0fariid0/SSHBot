@@ -37,3 +37,9 @@ Package/module installation is not transactional. File rollback concerns registe
 ## Finglish menu update
 
 All 34 tests pass. The complete manager source is ASCII-only. An AST comparison against the previous packaged manager, with string constants normalized, confirms that only text changed. Python compilation passes.
+
+## Workspace layout update — 2026-10-27
+
+34 backend/bootstrap/manager tests pass. Node JavaScript syntax validation passes. Playwright Chromium checks pass at 1440×1000, 500×760 (compact Telegram-sized window), 390×844 with mocked system/content safe insets, and 844×390 landscape. Checks include host search/create, credential forms, owner users, fullscreen API request, legacy-client/unsupported fullscreen fallback, separate terminal page, retained WebSocket connections while navigating all other sections, switching two session tabs, closing a background session without navigating, closing the last session, and absence of document overflow. Telegram viewport height changes are simulated on mobile. Screenshots were inspected for desktop, compact/mobile and terminal layouts.
+
+These tests use explicit fixture APIs, a fake SSH WebSocket and mocked Telegram APIs. They verify interface behavior, not fullscreen availability in every real Telegram client. No new deployment or live-device Telegram fullscreen test was performed. Existing backend integration tests still cover real local AsyncSSH connections.
